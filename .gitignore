@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# pytest related
+pytest*
+
+# uv temp lock files
+uv-*.lock
+
+# OSX garbage
+.DS_Store
+
+# local data
+data/
+
+# env files
+.env*
+!.env.example
