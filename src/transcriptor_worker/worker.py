@@ -135,7 +135,7 @@ def process_submission(
     1. Reconstruct source and target storage backends.
     2. Extract page images from the submission's docs.
     3. Run Surya line detection on each successfully extracted page.
-    4. Copy ``desc.json`` to target storage.
+    4. Extract ``form_metadata`` from ``desc.json`` and write as ``metadata.json`` on target.
     5. Return a :class:`SubmissionRecord` (completed / failed) and all
        :class:`PageRecord` objects.
 
@@ -222,21 +222,27 @@ def process_submission(
         updated_records.append(updated)
 
     # ------------------------------------------------------------------
-    # Stage 3: copy desc.json to target
+    # Stage 3: extract form_metadata from desc.json → metadata.json
     # ------------------------------------------------------------------
     try:
+        import json as _json
+
         desc_src_path = f"{submission.source_path}/desc.json"
         desc_bytes = source_storage.read_bytes(desc_src_path)
-        desc_target_path = f"{submission.id}/desc.json"
-        target_storage.write_bytes(desc_target_path, desc_bytes)
+        desc = _json.loads(desc_bytes)
+        metadata = desc.get("form_metadata", {})
+        metadata_target_path = f"{submission.id}/metadata.json"
+        target_storage.write_text(
+            metadata_target_path, _json.dumps(metadata, ensure_ascii=False, indent=2)
+        )
         logger.debug(
-            "Copied desc.json for submission %s → %s",
+            "Extracted form_metadata → %s for submission %s",
+            metadata_target_path,
             submission.id,
-            desc_target_path,
         )
     except Exception as exc:
         logger.warning(
-            "Failed to copy desc.json for submission %s: %s", submission.id, exc
+            "Failed to extract metadata for submission %s: %s", submission.id, exc
         )
         # Non-fatal: submission still considered (potentially) complete.
 
