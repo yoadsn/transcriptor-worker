@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
-from transcriptor_worker.extraction.image_transform import transform_image
+from transcriptor_worker.extraction.image_transform import MAX_DIMENSION, transform_image
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SAMPLE_JPG = FIXTURES / "sample.jpg"
+
+
+def _create_jpeg_bytes(width: int, height: int) -> bytes:
+    """Create a minimal JPEG image with the given dimensions."""
+    img = Image.new("RGB", (width, height), color="red")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    return buf.getvalue()
 
 
 class TestTransformImage:
@@ -75,3 +85,51 @@ class TestTransformImage:
         data = SAMPLE_JPG.read_bytes()
         result, applied = transform_image(data, "jpeg", transforms=[])
         assert applied["rotation"] is None
+
+
+class TestResizeTransform:
+    def test_wide_image_is_resized(self):
+        data = _create_jpeg_bytes(4000, 2000)
+        result, applied = transform_image(data, "jpeg")
+        assert applied["original_size"] == (4000, 2000)
+        result_img = Image.open(io.BytesIO(result))
+        assert result_img.width == MAX_DIMENSION
+        assert result_img.height == 1500
+
+    def test_tall_image_is_resized(self):
+        data = _create_jpeg_bytes(2000, 5000)
+        result, applied = transform_image(data, "jpeg")
+        assert applied["original_size"] == (2000, 5000)
+        result_img = Image.open(io.BytesIO(result))
+        assert result_img.width == 1200
+        assert result_img.height == MAX_DIMENSION
+
+    def test_square_image_over_limit_is_resized(self):
+        data = _create_jpeg_bytes(4000, 4000)
+        result, applied = transform_image(data, "jpeg")
+        assert applied["original_size"] == (4000, 4000)
+        result_img = Image.open(io.BytesIO(result))
+        assert result_img.width == MAX_DIMENSION
+        assert result_img.height == MAX_DIMENSION
+
+    def test_small_image_is_not_resized(self):
+        data = _create_jpeg_bytes(1000, 800)
+        result, applied = transform_image(data, "jpeg")
+        assert "original_size" not in applied
+        result_img = Image.open(io.BytesIO(result))
+        assert result_img.width == 1000
+        assert result_img.height == 800
+
+    def test_image_at_exact_limit_is_not_resized(self):
+        data = _create_jpeg_bytes(MAX_DIMENSION, MAX_DIMENSION)
+        result, applied = transform_image(data, "jpeg")
+        assert "original_size" not in applied
+        result_img = Image.open(io.BytesIO(result))
+        assert result_img.width == MAX_DIMENSION
+        assert result_img.height == MAX_DIMENSION
+
+    def test_aspect_ratio_is_preserved(self):
+        data = _create_jpeg_bytes(6000, 3000)
+        result, applied = transform_image(data, "jpeg")
+        result_img = Image.open(io.BytesIO(result))
+        assert result_img.width / result_img.height == pytest.approx(2.0, rel=1e-2)

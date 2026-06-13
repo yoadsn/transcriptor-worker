@@ -11,6 +11,10 @@ Before any rotation detection, EXIF orientation is applied via
 ``ImageOps.exif_transpose`` so that pixel data matches the intended
 visual orientation.
 
+Images with a width or height exceeding 3000 pixels are rescaled so that
+the longer side becomes 3000 pixels, maintaining aspect ratio.  This
+resize happens after EXIF transpose but before rotation detection.
+
 Rotation results are cached in a ``transforms.json`` file written back to
 the source storage so that subsequent runs can skip the expensive detection
 step.
@@ -141,6 +145,51 @@ def _detect_rotation(image_bytes: bytes) -> int | None:
     return None
 
 
+MAX_DIMENSION = 3000
+
+
+def _apply_resize(image_bytes: bytes, image_format: str) -> tuple[bytes, tuple[int, int] | None]:
+    """Rescale image so that no dimension exceeds MAX_DIMENSION pixels.
+
+    If both width and height are <= MAX_DIMENSION, the image is returned
+    unchanged.
+
+    Returns:
+        Tuple of (image bytes, original dimensions) if resized, or
+        (original bytes, None) if no resize was needed.
+    """
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        width, height = img.size
+
+        if width <= MAX_DIMENSION and height <= MAX_DIMENSION:
+            return image_bytes, None
+
+        original_size = (width, height)
+
+        if width > height:
+            new_width = MAX_DIMENSION
+            new_height = round(height * MAX_DIMENSION / width)
+        else:
+            new_height = MAX_DIMENSION
+            new_width = round(width * MAX_DIMENSION / height)
+
+        resized = img.resize((new_width, new_height), Image.LANCZOS)
+        buf = io.BytesIO()
+        fmt = image_format.upper() if image_format else "JPEG"
+        if fmt == "JPG":
+            fmt = "JPEG"
+        resized.save(buf, format=fmt)
+        logger.info(
+            "Resized image from %dx%d to %dx%d",
+            width, height, new_width, new_height,
+        )
+        return buf.getvalue(), original_size
+    except Exception as exc:
+        logger.warning("Failed to apply resize: %s", exc)
+        return image_bytes, None
+
+
 def _apply_exif_transpose(image_bytes: bytes) -> bytes:
     """Apply EXIF orientation tag as a physical pixel rotation.
 
@@ -196,14 +245,19 @@ def transform_image(
 
     Returns:
         Tuple of (transformed image bytes, applied transforms dict).
-        The applied transforms dict has the form ``{"rotation": <val>}`` where
+        The applied transforms dict has the form
+        ``{"rotation": <val>, "original_size": (w, h) | None}`` where
         ``<val>`` is 0, 90, 180, or 270.  If rotation could not be determined
-        the value is ``None``.
+        the value is ``None``.  ``original_size`` is present only when the
+        image was resized because a dimension exceeded ``MAX_DIMENSION``.
     """
     # Step 1: Apply EXIF orientation as physical pixel rotation
     image_bytes = _apply_exif_transpose(image_bytes)
 
-    # Step 2: Check for cached rotation (unless force re-detect)
+    # Step 2: Resize if any dimension exceeds MAX_DIMENSION
+    image_bytes, original_size = _apply_resize(image_bytes, image_format)
+
+    # Step 3: Check for cached rotation (unless force re-detect)
     force_re = os.environ.get("FORCE_ROTATION_REDETECTION", "").lower() in ("true", "1", "yes")
 
     cached_rotation: int | None = None
@@ -214,14 +268,16 @@ def transform_image(
                 logger.info("Using cached rotation=%s", cached_rotation)
                 break
 
-    # Step 3: Detect rotation if not cached
+    # Step 4: Detect rotation if not cached
     if cached_rotation is not None:
         rotation = cached_rotation
     else:
         rotation = _detect_rotation(image_bytes)
 
-    # Step 4: Apply rotation
+    # Step 5: Apply rotation
     result_bytes = _apply_rotation(image_bytes, image_format, rotation or 0)
 
     applied: dict[str, Any] = {"rotation": rotation}
+    if original_size is not None:
+        applied["original_size"] = original_size
     return result_bytes, applied

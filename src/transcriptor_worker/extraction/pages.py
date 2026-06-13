@@ -215,9 +215,13 @@ def _extract_image_page(
 
     try:
         image = PILImage.open(io.BytesIO(raw_bytes))
+        exif_data = image.info.get("exif")
         image = image.convert("RGB")
         buf = io.BytesIO()
-        image.save(buf, format="JPEG")
+        save_kwargs: dict[str, Any] = {"format": "JPEG"}
+        if exif_data:
+            save_kwargs["exif"] = exif_data
+        image.save(buf, **save_kwargs)
         image_bytes = buf.getvalue()
 
         # Push down only the relevant transforms for this page
