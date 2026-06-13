@@ -1,35 +1,227 @@
 """Image transformation hook.
 
-Today this is a no-op pass-through.  It sits between page extraction (PDF
-rasterization or raw image read) and writing to storage, providing the
-insertion point for future per-image processing such as:
+Detects image rotation and corrects it to upright orientation using
+multiple fallback strategies:
 
-- Deskewing (correct rotation from scanning)
-- Binarization (convert to black-and-white for cleaner OCR input)
-- Contrast enhancement
-- Resampling to a canonical DPI / resolution
+1. Azure Document Intelligence (prebuilt-read model) - highest priority
+2. Tesseract OCR (OSD mode) - fallback if Azure unavailable
+3. No-op - fallback if neither strategy is available
+
+Before any rotation detection, EXIF orientation is applied via
+``ImageOps.exif_transpose`` so that pixel data matches the intended
+visual orientation.
+
+Rotation results are cached in a ``transforms.json`` file written back to
+the source storage so that subsequent runs can skip the expensive detection
+step.
 
 Usage::
 
-    transformed = transform_image(raw_bytes, "jpeg")
+    transformed, applied = transform_image(raw_bytes, "jpeg", transforms=cached_list)
     storage.write_bytes(path, transformed)
 """
 
 from __future__ import annotations
 
+import io
+import logging
+import os
+from typing import Any
 
-def transform_image(image_bytes: bytes, image_format: str) -> bytes:  # noqa: ARG001
-    """Apply image transformations and return the processed bytes.
+from PIL import Image, ImageOps
+
+logger = logging.getLogger(__name__)
+
+
+def _normalize_angle(angle: float) -> int:
+    """Round angle to nearest 90-degree increment.
+
+    Azure returns -180 to 180.  We round to x*90 and convert to a
+    clockwise rotation amount (0, 90, 180, 270).
+
+    Examples:
+        -91.5 -> round to -90 -> rotate 90 CW
+        45    -> round to 0   -> rotate 0 CW
+        135   -> round to 180 -> rotate 180 CW
+    """
+    rounded = round(angle / 90) * 90
+    # Convert to positive clockwise rotation
+    rotation = int(-rounded % 360)
+    return rotation
+
+
+def _try_azure_rotation(image_bytes: bytes) -> int | None:
+    """Detect rotation using Azure Document Intelligence prebuilt-read model.
+
+    Returns rotation degrees (0, 90, 180, 270) or None if unavailable.
+    """
+    use_azure = os.environ.get("USE_IMAGE_TRANSFORM_AZURE_AI", "").lower() == "true"
+    endpoint = os.environ.get("AZURE_AI_ENDPOINT")
+    key = os.environ.get("AZURE_AI_API_KEY")
+
+    if not (use_azure and endpoint and key):
+        return None
+
+    try:
+        from azure.ai.documentintelligence import DocumentIntelligenceClient
+        from azure.ai.documentintelligence.models import AnalyzeDocumentRequest
+        from azure.core.credentials import AzureKeyCredential
+
+        # Azure's http logging is too loud.
+        _azure_logger = logging.getLogger("azure.core.pipeline.policies.http_logging_policy")
+        _azure_logger.setLevel(logging.WARNING)
+
+        client = DocumentIntelligenceClient(
+            endpoint=endpoint,
+            credential=AzureKeyCredential(key),
+        )
+
+        # Upload image bytes directly
+        poller = client.begin_analyze_document(
+            "prebuilt-read",
+            AnalyzeDocumentRequest(bytes_source=image_bytes),
+        )
+        result = poller.result()
+
+        if result.pages and len(result.pages) > 0:
+            page = result.pages[0]
+            angle = getattr(page, "angle", 0) or 0
+            rotation = _normalize_angle(angle)
+            logger.info("Azure detected angle=%s -> rotation=%d", angle, rotation)
+            return rotation
+
+        return None
+
+    except Exception as exc:
+        logger.warning("Azure Document Intelligence rotation detection failed: %s", exc)
+        return None
+
+
+def _try_tesseract_rotation(image_bytes: bytes) -> int | None:
+    """Detect rotation using Tesseract OSD mode.
+
+    Returns rotation degrees (0, 90, 180, 270) or None if unavailable.
+    """
+    try:
+        import pytesseract
+
+        img = Image.open(io.BytesIO(image_bytes))
+        osd_output = pytesseract.image_to_osd(img)
+
+        # Parse "Rotate: <degrees>" from OSD output
+        for line in osd_output.splitlines():
+            if line.lower().startswith("rotate:"):
+                rotation = int(line.split(":")[1].strip())
+                logger.info("Tesseract detected rotation=%d", rotation)
+                return rotation
+
+        return None
+
+    except ImportError:
+        logger.debug("pytesseract not installed, skipping Tesseract strategy")
+        return None
+    except Exception as exc:
+        logger.warning("Tesseract rotation detection failed: %s", exc)
+        return None
+
+
+def _detect_rotation(image_bytes: bytes) -> int | None:
+    """Run the rotation detection strategy cascade.
+
+    Returns rotation degrees (0, 90, 180, 270) or None if all strategies failed.
+    """
+    rotation = _try_azure_rotation(image_bytes)
+    if rotation is not None:
+        return rotation
+
+    rotation = _try_tesseract_rotation(image_bytes)
+    if rotation is not None:
+        return rotation
+
+    return None
+
+
+def _apply_exif_transpose(image_bytes: bytes) -> bytes:
+    """Apply EXIF orientation tag as a physical pixel rotation.
+
+    Returns the transposed bytes, or the original if no EXIF orientation
+    is present or the image cannot be parsed.
+    """
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        transposed = ImageOps.exif_transpose(img)
+        if transposed is None:
+            return image_bytes
+        buf = io.BytesIO()
+        img_format = img.format or "JPEG"
+        transposed.save(buf, format=img_format)
+        return buf.getvalue()
+    except Exception as exc:
+        logger.debug("EXIF transpose failed (no-op): %s", exc)
+        return image_bytes
+
+
+def _apply_rotation(image_bytes: bytes, image_format: str, rotation: int) -> bytes:
+    """Rotate the image by the given clockwise degrees and re-encode."""
+    if rotation == 0:
+        return image_bytes
+
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        rotated = img.rotate(-rotation, expand=True)
+        buf = io.BytesIO()
+        fmt = image_format.upper() if image_format else "JPEG"
+        if fmt == "JPG":
+            fmt = "JPEG"
+        rotated.save(buf, format=fmt)
+        return buf.getvalue()
+    except Exception as exc:
+        logger.warning("Failed to apply rotation %d: %s", rotation, exc)
+        return image_bytes
+
+
+def transform_image(
+    image_bytes: bytes,
+    image_format: str,
+    transforms: list[dict[str, Any]] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
+    """Detect and correct image rotation, returning the processed bytes and applied transforms.
 
     Args:
         image_bytes: Raw image data as returned by page extraction.
         image_format: Format hint string (e.g. ``"jpeg"``, ``"png"``).
-            Currently unused; reserved for format-aware future transforms.
+        transforms: Optional list of cached transform dicts for this specific
+            page (e.g. ``[{"rotation": 90}]``).  Ignored when
+            ``FORCE_ROTATION_REDETECTION`` is set in the environment.
 
     Returns:
-        Transformed image bytes.  Today this is identical to *image_bytes*.
+        Tuple of (transformed image bytes, applied transforms dict).
+        The applied transforms dict has the form ``{"rotation": <val>}`` where
+        ``<val>`` is 0, 90, 180, or 270.  If rotation could not be determined
+        the value is ``None``.
     """
-    # No-op: return input unchanged.
-    # Future transforms (Pillow-based deskew, binarization, contrast, etc.)
-    # should be applied here before returning.
-    return image_bytes
+    # Step 1: Apply EXIF orientation as physical pixel rotation
+    image_bytes = _apply_exif_transpose(image_bytes)
+
+    # Step 2: Check for cached rotation (unless force re-detect)
+    force_re = os.environ.get("FORCE_ROTATION_REDETECTION", "").lower() in ("true", "1", "yes")
+
+    cached_rotation: int | None = None
+    if not force_re and transforms:
+        for t in transforms:
+            if "rotation" in t:
+                cached_rotation = t["rotation"]
+                logger.info("Using cached rotation=%s", cached_rotation)
+                break
+
+    # Step 3: Detect rotation if not cached
+    if cached_rotation is not None:
+        rotation = cached_rotation
+    else:
+        rotation = _detect_rotation(image_bytes)
+
+    # Step 4: Apply rotation
+    result_bytes = _apply_rotation(image_bytes, image_format, rotation or 0)
+
+    applied: dict[str, Any] = {"rotation": rotation}
+    return result_bytes, applied

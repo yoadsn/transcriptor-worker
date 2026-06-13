@@ -46,8 +46,8 @@ class StorageConfig:
     not picklable).
     """
 
-    storage_type: str          # "local" | "s3"
-    storage_path: str          # local root or s3://bucket/prefix
+    storage_type: str  # "local" | "s3"
+    storage_path: str  # local root or s3://bucket/prefix
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
     aws_region: str | None = None
@@ -62,7 +62,7 @@ def _build_backend(cfg: StorageConfig) -> tuple[StorageBackend, str]:
         return LocalStorageBackend(cfg.storage_path), ""
 
     if cfg.storage_type == "s3":
-        without_scheme = cfg.storage_path[len("s3://"):]
+        without_scheme = cfg.storage_path[len("s3://") :]
         bucket, _, prefix = without_scheme.partition("/")
         backend = S3StorageBackend(
             bucket,
@@ -173,9 +173,10 @@ def process_submission(
     # Stage 1: page extraction
     # ------------------------------------------------------------------
     try:
-        page_records = extract_pages(
+        pages_result = extract_pages(
             submission, source_storage, target_storage, temp_dir
         )
+        page_records = pages_result.page_records
     except Exception as exc:
         logger.error(
             "Page extraction failed for submission %s: %s",
@@ -190,6 +191,30 @@ def process_submission(
             ),
             [],
         )
+
+    # ------------------------------------------------------------------
+    # Write transforms.json back to source storage
+    # ------------------------------------------------------------------
+    if pages_result.transforms:
+        try:
+            import json as _json
+
+            transforms_src_path = f"{submission.source_path}/transforms.json"
+            source_storage.write_text(
+                transforms_src_path,
+                _json.dumps(pages_result.transforms, ensure_ascii=False, indent=2),
+            )
+            logger.info(
+                "Wrote transforms.json to %s for submission %s",
+                transforms_src_path,
+                submission.id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to write transforms.json for submission %s: %s",
+                submission.id,
+                exc,
+            )
 
     # ------------------------------------------------------------------
     # Stage 2: line extraction on successfully extracted pages
@@ -254,12 +279,14 @@ def process_submission(
 
     if all_failed:
         status = "failed"
-        error = "; ".join(
-            r.error for r in updated_records if r.error
-        )[:500]
+        error = "; ".join(r.error for r in updated_records if r.error)[:500]
     elif any_failed:
-        status = "completed"   # partial success — some pages failed
-        failed_pages = [r.image_filename or r.doc_filename for r in updated_records if r.status == "failed"]
+        status = "completed"  # partial success — some pages failed
+        failed_pages = [
+            r.image_filename or r.doc_filename
+            for r in updated_records
+            if r.status == "failed"
+        ]
         error = f"Some pages failed: {', '.join(failed_pages)}"
     else:
         status = "completed"

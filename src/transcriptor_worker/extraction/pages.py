@@ -17,8 +17,11 @@ For PDF files *doc_basename* is the PDF stem and N ranges over all pages.
 from __future__ import annotations
 
 import io
+import json
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pymupdf
 from PIL import Image as PILImage
@@ -35,6 +38,14 @@ PDF_RENDER_DPI = 300
 # Output format for all page images written to storage.
 _OUTPUT_FORMAT = "jpeg"
 _OUTPUT_EXT = ".jpg"
+
+
+@dataclass
+class ExtractPagesResult:
+    """Return value from :func:`extract_pages`."""
+
+    page_records: list[PageRecord] = field(default_factory=list)
+    transforms: dict[str, Any] = field(default_factory=dict)
 
 
 def _is_pdf(doc_file: DocFile) -> bool:
@@ -59,13 +70,14 @@ def _write_page(
     filename: str,
     target_storage: StorageBackend,
     temp_dir: str,
-) -> str:
+    transforms: list[dict[str, Any]] | None = None,
+) -> tuple[str, dict[str, Any]]:
     """Transform, then write page image to both target storage and temp dir.
 
     Returns:
-        The filename (not full path) of the written image.
+        Tuple of (filename, applied_transforms dict).
     """
-    data = transform_image(image_bytes, image_format)
+    data, applied = transform_image(image_bytes, image_format, transforms=transforms)
 
     target_path = f"{submission_id}/{filename}"
     target_storage.write_bytes(target_path, data)
@@ -77,7 +89,7 @@ def _write_page(
     local_path.write_bytes(data)
     logger.debug("Wrote page to temp: %s", local_path)
 
-    return filename
+    return filename, applied
 
 
 def _extract_pdf_pages(
@@ -86,28 +98,34 @@ def _extract_pdf_pages(
     submission_id: str,
     target_storage: StorageBackend,
     temp_dir: str,
-) -> list[PageRecord]:
+    transforms_cache: dict[str, Any] | None = None,
+) -> tuple[list[PageRecord], dict[str, Any]]:
     """Rasterize each page of a PDF and write page images.
 
-    Returns one :class:`PageRecord` per page.  On per-page failure the record
-    gets ``status="failed"`` and processing continues with the next page.
+    Returns one :class:`PageRecord` per page and a transforms dict.
+    On per-page failure the record gets ``status="failed"`` and processing
+    continues with the next page.
     """
     doc_basename = Path(doc_file.stored_filename).stem
     records: list[PageRecord] = []
+    applied_transforms: dict[str, Any] = {}
 
     try:
         pdf = pymupdf.open(stream=raw_bytes, filetype="pdf")
     except Exception as exc:
         logger.error("Failed to open PDF %s: %s", doc_file.stored_filename, exc)
-        return [
-            PageRecord(
-                submission_id=submission_id,
-                doc_filename=doc_file.stored_filename,
-                page_number=1,
-                status="failed",
-                error=f"Failed to open PDF: {exc}",
-            )
-        ]
+        return (
+            [
+                PageRecord(
+                    submission_id=submission_id,
+                    doc_filename=doc_file.stored_filename,
+                    page_number=1,
+                    status="failed",
+                    error=f"Failed to open PDF: {exc}",
+                )
+            ],
+            applied_transforms,
+        )
 
     logger.info(
         "Extracting %d page(s) from PDF %s", pdf.page_count, doc_file.stored_filename
@@ -121,14 +139,25 @@ def _extract_pdf_pages(
             pixmap = page.get_pixmap(dpi=PDF_RENDER_DPI)
             image_bytes = pixmap.tobytes(_OUTPUT_FORMAT)
 
-            _write_page(
+            # Push down only the relevant transforms for this page
+            page_transforms: list[dict[str, Any]] | None = None
+            if transforms_cache:
+                doc_entry = transforms_cache.get(doc_file.stored_filename, {})
+                page_transforms = doc_entry.get(str(page_number))
+
+            _, applied = _write_page(
                 image_bytes,
                 _OUTPUT_FORMAT,
                 submission_id,
                 filename,
                 target_storage,
                 temp_dir,
+                transforms=page_transforms,
             )
+
+            # Record the applied transform for this page
+            page_key = str(page_number)
+            applied_transforms[page_key] = [applied]
 
             records.append(
                 PageRecord(
@@ -164,7 +193,7 @@ def _extract_pdf_pages(
             )
 
     pdf.close()
-    return records
+    return records, applied_transforms
 
 
 def _extract_image_page(
@@ -173,12 +202,13 @@ def _extract_image_page(
     submission_id: str,
     target_storage: StorageBackend,
     temp_dir: str,
-) -> PageRecord:
+    transforms_cache: dict[str, Any] | None = None,
+) -> tuple[PageRecord, dict[str, Any]]:
     """Convert any supported image to a single JPEG page.
 
     Accepts common image formats (JPEG, PNG, GIF, WebP, BMP, TIFF, etc.)
     via Pillow and re-encodes to JPEG for a uniform output format.
-    Returns a single :class:`PageRecord`.
+    Returns a single :class:`PageRecord` and applied transforms dict.
     """
     doc_basename = Path(doc_file.stored_filename).stem
     filename = _page_filename(doc_basename, 1)
@@ -190,32 +220,45 @@ def _extract_image_page(
         image.save(buf, format="JPEG")
         image_bytes = buf.getvalue()
 
-        _write_page(
+        # Push down only the relevant transforms for this page
+        page_transforms: list[dict[str, Any]] | None = None
+        if transforms_cache:
+            doc_entry = transforms_cache.get(doc_file.stored_filename, {})
+            page_transforms = doc_entry.get("1")
+
+        _, applied = _write_page(
             image_bytes,
             _OUTPUT_FORMAT,
             submission_id,
             filename,
             target_storage,
             temp_dir,
+            transforms=page_transforms,
         )
 
         logger.debug("Converted image %s → %s", doc_file.stored_filename, filename)
-        return PageRecord(
-            submission_id=submission_id,
-            doc_filename=doc_file.stored_filename,
-            page_number=1,
-            status="pending",
-            image_filename=filename,
+        return (
+            PageRecord(
+                submission_id=submission_id,
+                doc_filename=doc_file.stored_filename,
+                page_number=1,
+                status="pending",
+                image_filename=filename,
+            ),
+            {"1": [applied]},
         )
 
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to process image %s: %s", doc_file.stored_filename, exc)
-        return PageRecord(
-            submission_id=submission_id,
-            doc_filename=doc_file.stored_filename,
-            page_number=1,
-            status="failed",
-            error=str(exc),
+        return (
+            PageRecord(
+                submission_id=submission_id,
+                doc_filename=doc_file.stored_filename,
+                page_number=1,
+                status="failed",
+                error=str(exc),
+            ),
+            {},
         )
 
 
@@ -224,14 +267,18 @@ def extract_pages(
     source_storage: StorageBackend,
     target_storage: StorageBackend,
     temp_dir: str,
-) -> list[PageRecord]:
+) -> ExtractPagesResult:
     """Extract all page images for *submission*.
 
     Reads ``desc.json`` from source storage, then processes each listed doc:
     - PDFs are rasterized page-by-page with pyMuPDF at :data:`PDF_RENDER_DPI`.
     - Image files are passed through (re-encoded to JPEG).
-    - Every page image is run through :func:`transform_image` (no-op today).
+    - Every page image is run through :func:`transform_image` (rotation correction).
     - Pages are written to both target storage and local temp storage.
+
+    If a ``transforms.json`` file exists alongside ``desc.json`` it is loaded
+    and used to skip rotation detection for pages that were already processed.
+    After extraction, all applied transforms are collected and returned.
 
     On per-doc failure a :class:`PageRecord` with ``status="failed"`` is
     appended and processing continues with the remaining docs.
@@ -243,7 +290,7 @@ def extract_pages(
         temp_dir: Root of local temp directory for this run.
 
     Returns:
-        List of :class:`PageRecord`, one per extracted page (or failed attempt).
+        :class:`ExtractPagesResult` containing page records and applied transforms.
     """
     desc_path = f"{submission.source_path}/desc.json"
     logger.info("Processing submission %s from %s", submission.id, desc_path)
@@ -252,33 +299,47 @@ def extract_pages(
         raw_json = source_storage.read_text(desc_path)
     except Exception as exc:
         logger.error("Cannot read desc.json for %s: %s", submission.id, exc)
-        return [
-            PageRecord(
-                submission_id=submission.id,
-                doc_filename="desc.json",
-                page_number=1,
-                status="failed",
-                error=f"Cannot read desc.json: {exc}",
-            )
-        ]
+        return ExtractPagesResult(
+            page_records=[
+                PageRecord(
+                    submission_id=submission.id,
+                    doc_filename="desc.json",
+                    page_number=1,
+                    status="failed",
+                    error=f"Cannot read desc.json: {exc}",
+                )
+            ]
+        )
 
     try:
-        import json as _json
-
-        desc = DescJson.from_dict(_json.loads(raw_json))
+        desc = DescJson.from_dict(json.loads(raw_json))
     except Exception as exc:
         logger.error("Cannot parse desc.json for %s: %s", submission.id, exc)
-        return [
-            PageRecord(
-                submission_id=submission.id,
-                doc_filename="desc.json",
-                page_number=1,
-                status="failed",
-                error=f"Cannot parse desc.json: {exc}",
-            )
-        ]
+        return ExtractPagesResult(
+            page_records=[
+                PageRecord(
+                    submission_id=submission.id,
+                    doc_filename="desc.json",
+                    page_number=1,
+                    status="failed",
+                    error=f"Cannot parse desc.json: {exc}",
+                )
+            ]
+        )
+
+    # Load cached transforms if available
+    transforms_path = f"{submission.source_path}/transforms.json"
+    transforms_cache: dict[str, Any] | None = None
+    try:
+        transforms_json = source_storage.read_text(transforms_path)
+        transforms_cache = json.loads(transforms_json)
+        logger.info("Loaded cached transforms for submission %s", submission.id)
+    except Exception:
+        logger.debug("No cached transforms found for submission %s", submission.id)
+        transforms_cache = None
 
     all_records: list[PageRecord] = []
+    all_transforms: dict[str, Any] = {}
 
     for doc_file in desc.files:
         doc_path = f"{submission.source_path}/{doc_file.stored_filename}"
@@ -307,15 +368,19 @@ def extract_pages(
             continue
 
         if _is_pdf(doc_file):
-            records = _extract_pdf_pages(
-                doc_file, raw_bytes, submission.id, target_storage, temp_dir
+            records, doc_transforms = _extract_pdf_pages(
+                doc_file, raw_bytes, submission.id, target_storage, temp_dir,
+                transforms_cache=transforms_cache,
             )
         else:
-            records = [
-                _extract_image_page(
-                    doc_file, raw_bytes, submission.id, target_storage, temp_dir
-                )
-            ]
+            record, doc_transforms = _extract_image_page(
+                doc_file, raw_bytes, submission.id, target_storage, temp_dir,
+                transforms_cache=transforms_cache,
+            )
+            records = [record]
+
+        if doc_transforms:
+            all_transforms[doc_file.stored_filename] = doc_transforms
 
         all_records.extend(records)
 
@@ -325,4 +390,4 @@ def extract_pages(
         len(all_records),
         sum(1 for r in all_records if r.status == "failed"),
     )
-    return all_records
+    return ExtractPagesResult(page_records=all_records, transforms=all_transforms)
