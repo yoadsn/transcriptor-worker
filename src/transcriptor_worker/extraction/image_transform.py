@@ -11,8 +11,8 @@ Before any rotation detection, EXIF orientation is applied via
 ``ImageOps.exif_transpose`` so that pixel data matches the intended
 visual orientation.
 
-Images with a width or height exceeding 3000 pixels are rescaled so that
-the longer side becomes 3000 pixels, maintaining aspect ratio.  This
+Images with a width or height exceeding 2048 pixels are rescaled so that
+the longer side becomes 2048 pixels, maintaining aspect ratio.  This
 resize happens after EXIF transpose but before rotation detection.
 
 Rotation results are cached in a ``transforms.json`` file written back to
@@ -145,7 +145,7 @@ def _detect_rotation(image_bytes: bytes) -> int | None:
     return None
 
 
-MAX_DIMENSION = 3000
+MAX_DIMENSION = 2048
 
 
 def _apply_resize(image_bytes: bytes, image_format: str) -> tuple[bytes, tuple[int, int] | None]:
