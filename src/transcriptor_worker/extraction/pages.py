@@ -1,8 +1,9 @@
-"""Page extraction — PDF rasterization and image pass-through.
+"""Page extraction — PDF rasterization and image conversion.
 
 For each submission:
 - PDF files are opened with pyMuPDF and each page is rasterized to a JPEG.
-- Image files are passed through as-is (re-encoded to JPEG for uniformity).
+- Image files (JPEG, PNG, GIF, WebP, BMP, TIFF, …) are decoded via Pillow
+  and re-encoded to JPEG for a uniform output format.
 - Every extracted page image passes through :func:`transform_image` before
   being written to target storage and the local temp directory.
 
@@ -15,12 +16,12 @@ For PDF files *doc_basename* is the PDF stem and N ranges over all pages.
 
 from __future__ import annotations
 
-import json
+import io
 import logging
-import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import pymupdf
+from PIL import Image as PILImage
 
 from transcriptor_worker.extraction.image_transform import transform_image
 from transcriptor_worker.models import DescJson, DocFile, PageRecord, Submission
@@ -30,9 +31,6 @@ logger = logging.getLogger(__name__)
 
 # DPI used when rasterising PDF pages.
 PDF_RENDER_DPI = 300
-
-# Image file extensions treated as direct pass-through (lower-case, with dot).
-_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".webp"}
 
 # Output format for all page images written to storage.
 _OUTPUT_FORMAT = "jpeg"
@@ -100,9 +98,7 @@ def _extract_pdf_pages(
     try:
         pdf = pymupdf.open(stream=raw_bytes, filetype="pdf")
     except Exception as exc:
-        logger.error(
-            "Failed to open PDF %s: %s", doc_file.stored_filename, exc
-        )
+        logger.error("Failed to open PDF %s: %s", doc_file.stored_filename, exc)
         return [
             PageRecord(
                 submission_id=submission_id,
@@ -143,7 +139,12 @@ def _extract_pdf_pages(
                     image_filename=filename,
                 )
             )
-            logger.debug("Extracted page %d/%d of %s", page_number, pdf.page_count, doc_file.stored_filename)
+            logger.debug(
+                "Extracted page %d/%d of %s",
+                page_number,
+                pdf.page_count,
+                doc_file.stored_filename,
+            )
 
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -173,24 +174,21 @@ def _extract_image_page(
     target_storage: StorageBackend,
     temp_dir: str,
 ) -> PageRecord:
-    """Pass an image file through as a single page.
+    """Convert any supported image to a single JPEG page.
 
-    The image is re-encoded to JPEG for a uniform output format.
+    Accepts common image formats (JPEG, PNG, GIF, WebP, BMP, TIFF, etc.)
+    via Pillow and re-encodes to JPEG for a uniform output format.
     Returns a single :class:`PageRecord`.
     """
     doc_basename = Path(doc_file.stored_filename).stem
     filename = _page_filename(doc_basename, 1)
 
     try:
-        # Re-encode to JPEG via pyMuPDF Pixmap for consistent output format.
-        # This handles JPEG, PNG, TIFF, BMP, WebP, etc.
-        pixmap = pymupdf.Pixmap(raw_bytes)
-        # Convert CMYK/alpha to RGB if necessary before JPEG encoding
-        if pixmap.colorspace and pixmap.colorspace.n > 3:
-            pixmap = pymupdf.Pixmap(pymupdf.csRGB, pixmap)
-        elif pixmap.alpha:
-            pixmap = pymupdf.Pixmap(pymupdf.csRGB, pixmap)
-        image_bytes = pixmap.tobytes(_OUTPUT_FORMAT)
+        image = PILImage.open(io.BytesIO(raw_bytes))
+        image = image.convert("RGB")
+        buf = io.BytesIO()
+        image.save(buf, format="JPEG")
+        image_bytes = buf.getvalue()
 
         _write_page(
             image_bytes,
@@ -201,7 +199,7 @@ def _extract_image_page(
             temp_dir,
         )
 
-        logger.debug("Passed through image %s as %s", doc_file.stored_filename, filename)
+        logger.debug("Converted image %s → %s", doc_file.stored_filename, filename)
         return PageRecord(
             submission_id=submission_id,
             doc_filename=doc_file.stored_filename,
@@ -211,9 +209,7 @@ def _extract_image_page(
         )
 
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Failed to process image %s: %s", doc_file.stored_filename, exc
-        )
+        logger.warning("Failed to process image %s: %s", doc_file.stored_filename, exc)
         return PageRecord(
             submission_id=submission_id,
             doc_filename=doc_file.stored_filename,
@@ -268,6 +264,7 @@ def extract_pages(
 
     try:
         import json as _json
+
         desc = DescJson.from_dict(_json.loads(raw_json))
     except Exception as exc:
         logger.error("Cannot parse desc.json for %s: %s", submission.id, exc)

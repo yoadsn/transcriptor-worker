@@ -106,6 +106,8 @@ One JSON file per page. Structure:
 {
   "submission_id": "50713c8c-d252-4b58-b643-b6834c91f04a",
   "image_filename": "0_p1.jpg",
+  "image_width": 2550,
+  "image_height": 3300,
   "lines": [
     {
       "index": 0,                           // Zero-based line order
@@ -122,6 +124,8 @@ One JSON file per page. Structure:
 |-------|------|-------------|
 | `submission_id` | string | Links back to the submission |
 | `image_filename` | string | Corresponding page image file |
+| `image_width` | integer | Width of the page image in pixels |
+| `image_height` | integer | Height of the page image in pixels |
 | `lines[].index` | integer | Zero-based line index in detection order |
 | `lines[].bbox` | [number, number, number, number] | Axis-aligned bounding box `[x_min, y_min, x_max, y_max]` in image pixel coordinates |
 | `lines[].polygon` | [[number, number], ...] | Four-corner polygon (rotated bounding box) in image pixel coordinates, top-left → top-right → bottom-right → bottom-left |

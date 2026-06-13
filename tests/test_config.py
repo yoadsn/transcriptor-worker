@@ -191,3 +191,38 @@ class TestMaxSubmissions:
     def test_non_integer_raises_config_error(self):
         with pytest.raises(ConfigError, match="MAX_SUBMISSIONS"):
             Config.from_env(_env(MAX_SUBMISSIONS="abc"))
+
+
+# ---------------------------------------------------------------------------
+# FORCE_REPROCESS tests
+# ---------------------------------------------------------------------------
+
+
+class TestForceReprocess:
+    def test_default_is_false(self):
+        cfg = Config.from_env(_env())
+        assert cfg.force_reprocess is False
+
+    def test_true_value(self):
+        cfg = Config.from_env(_env(FORCE_REPROCESS="true"))
+        assert cfg.force_reprocess is True
+
+    def test_1_value(self):
+        cfg = Config.from_env(_env(FORCE_REPROCESS="1"))
+        assert cfg.force_reprocess is True
+
+    def test_yes_value(self):
+        cfg = Config.from_env(_env(FORCE_REPROCESS="yes"))
+        assert cfg.force_reprocess is True
+
+    def test_false_value(self):
+        cfg = Config.from_env(_env(FORCE_REPROCESS="false"))
+        assert cfg.force_reprocess is False
+
+    def test_empty_value(self):
+        cfg = Config.from_env(_env(FORCE_REPROCESS=""))
+        assert cfg.force_reprocess is False
+
+    def test_random_string(self):
+        cfg = Config.from_env(_env(FORCE_REPROCESS="anything"))
+        assert cfg.force_reprocess is False

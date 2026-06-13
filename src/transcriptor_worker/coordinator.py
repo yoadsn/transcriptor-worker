@@ -146,6 +146,7 @@ def build_work_queue(
     target_storage: StorageBackend,
     source_prefix: str,
     target_prefix: str,
+    force_reprocess: bool = False,
 ) -> list[Submission]:
     """Discover submissions and filter out already-completed ones.
 
@@ -155,6 +156,7 @@ def build_work_queue(
         target_storage: Target storage backend.
         source_prefix: Root prefix within source storage.
         target_prefix: Root prefix within target storage.
+        force_reprocess: If True, include already-completed submissions.
 
     Returns:
         Ordered list of :class:`Submission` objects to process.
@@ -173,21 +175,22 @@ def build_work_queue(
     # Discover all submissions in source
     all_submissions = discover_submissions(source_storage, source_prefix)
 
-    # Filter: skip completed; include new and failed
+    # Filter: skip completed (unless force_reprocess); include new and failed
     work_queue: list[Submission] = []
     skipped = 0
     for sub in all_submissions:
         record = existing.get(sub.id)
-        if record and record.status == "completed":
+        if record and record.status == "completed" and not force_reprocess:
             skipped += 1
             logger.debug("Skipping completed submission %s", sub.id)
         else:
             work_queue.append(sub)
 
     logger.info(
-        "Work queue: %d submissions to process, %d skipped (completed)",
+        "Work queue: %d submissions to process, %d skipped (completed)%s",
         len(work_queue),
         skipped,
+        " (force_reprocess=True)" if force_reprocess else "",
     )
     return work_queue
 
@@ -243,6 +246,7 @@ def run() -> None:
         target_storage,
         source_prefix,
         target_prefix,
+        force_reprocess=config.force_reprocess,
     )
 
     if config.max_submissions is not None:

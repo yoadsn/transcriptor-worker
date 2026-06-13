@@ -14,6 +14,8 @@ JSON output format (one file per page)::
     {
         "submission_id": "<id>",
         "image_filename": "<stem>.jpg",
+        "image_width": 2550,
+        "image_height": 3300,
         "lines": [
             {
                 "index": 0,
@@ -99,14 +101,16 @@ def extract_lines(page_image_path: str, model: Any) -> dict:
                by :func:`init_surya_model`.
 
     Returns:
-        A dict with key ``"lines"`` containing a list of line dicts, each with
-        ``"index"``, ``"bbox"``, ``"polygon"``, and ``"confidence"``.
+        A dict with keys ``"image_width"``, ``"image_height"``, and ``"lines"``.
+        ``"lines"`` is a list of line dicts, each with ``"index"``, ``"bbox"``,
+        ``"polygon"``, and ``"confidence"``.
 
     Raises:
         FileNotFoundError: If *page_image_path* does not exist.
         Exception: Re-raises any error from Surya detection.
     """
     image = Image.open(page_image_path).convert("RGB")
+    image_width, image_height = image.size
 
     # DetectionPredictor expects a list of PIL images.
     results = model([image])
@@ -124,7 +128,11 @@ def extract_lines(page_image_path: str, model: Any) -> dict:
             }
         )
 
-    return {"lines": lines}
+    return {
+        "image_width": image_width,
+        "image_height": image_height,
+        "lines": lines,
+    }
 
 
 def process_page_lines(

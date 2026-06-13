@@ -37,6 +37,7 @@ class Config:
 
     # Testing / debugging
     max_submissions: int | None  # None = process all pending submissions
+    force_reprocess: bool  # True = reprocess already-completed submissions
 
     # Surya detection thresholds (None = use library defaults)
     detector_text_threshold: float | None
@@ -103,6 +104,10 @@ class Config:
                 )
             return result
 
+        def optional_bool(name: str) -> bool:
+            val = e.get(name, "").strip().lower()
+            return val in ("1", "true", "yes")
+
         def optional_float(name: str) -> float | None:
             val = e.get(name, "").strip()
             if not val:
@@ -127,6 +132,7 @@ class Config:
             target_aws_region=optional("TARGET_AWS_REGION"),
             worker_parallelism=parallelism,
             max_submissions=optional_int("MAX_SUBMISSIONS"),
+            force_reprocess=optional_bool("FORCE_REPROCESS"),
             detector_text_threshold=optional_float("DETECTOR_TEXT_THRESHOLD"),
             detector_blank_threshold=optional_float("DETECTOR_BLANK_THRESHOLD"),
             temp_dir=e.get("TEMP_DIR", "").strip() or tempfile.gettempdir(),
