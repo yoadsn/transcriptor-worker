@@ -10,13 +10,13 @@ from pathlib import Path
 
 import threading
 
-from PySide6.QtCore import Qt, QPointF, QTimer, QEvent
+from PySide6.QtCore import Qt, QPointF, QRectF, QTimer, QEvent, QSettings
 from PySide6.QtGui import QImage, QColor, QPen, QPainter, QPalette, QPolygonF, QMouseEvent, QIcon, QPainterPath
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSplitter, QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem,
     QLabel, QScrollArea, QHeaderView, QSlider, QPushButton, QFrame,
-    QGroupBox, QDoubleSpinBox, QMessageBox, QSpinBox,
+    QDoubleSpinBox, QMessageBox,
 )
 
 from transcriptor_worker.extraction.lines import init_surya_model, extract_lines
@@ -34,6 +34,7 @@ class ImageViewer(QScrollArea):
         self._selected_index = -1
         self._zoom = 1.0
         self._fit_scale = 1.0
+        self._show_boxes = False
 
         self._panning = False
         self._pan_start = None
@@ -49,6 +50,10 @@ class ImageViewer(QScrollArea):
         self.setWidget(self._canvas)
 
         self._on_zoom_change = None
+
+    def set_display_mode(self, show_boxes: bool):
+        self._show_boxes = show_boxes
+        self._canvas.update()
 
     def set_image_and_lines(self, image_path: Path, lines: list[dict]):
         if isinstance(image_path, QImage):
@@ -111,8 +116,46 @@ class ImageViewer(QScrollArea):
         self._canvas.setMaximumSize(w, h)
         self._canvas.update()
 
+    def _get_shape_points(self, line: dict) -> list[tuple[float, float]]:
+        if self._show_boxes:
+            bbox = line.get("bbox", [])
+            if len(bbox) != 4:
+                return []
+            x1, y1, x2, y2 = bbox
+            return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+        poly = line.get("polygon", [])
+        if len(poly) == 4:
+            return [(p[0], p[1]) for p in poly]
+        return []
+
+    def _draw_shape(self, painter: QPainter, pts: list[tuple[float, float]]):
+        if self._show_boxes:
+            x = pts[0][0] * self._zoom
+            y = pts[0][1] * self._zoom
+            w = (pts[2][0] - pts[0][0]) * self._zoom
+            h = (pts[2][1] - pts[0][1]) * self._zoom
+            painter.drawRect(QRectF(x, y, w, h))
+        else:
+            qpts = [QPointF(p[0] * self._zoom, p[1] * self._zoom) for p in pts]
+            painter.drawPolygon(QPolygonF(qpts))
+
+    def _build_selection_path(self, pts: list[tuple[float, float]]) -> QPainterPath:
+        path = QPainterPath()
+        if self._show_boxes:
+            x = pts[0][0] * self._zoom
+            y = pts[0][1] * self._zoom
+            w = (pts[2][0] - pts[0][0]) * self._zoom
+            h = (pts[2][1] - pts[0][1]) * self._zoom
+            path.addRect(QRectF(x, y, w, h))
+        else:
+            qpts = [QPointF(p[0] * self._zoom, p[1] * self._zoom) for p in pts]
+            path.addPolygon(QPolygonF(qpts))
+        return path
+
     def _paint_event(self, event):
         from PySide6.QtWidgets import QStyleOption, QStyle
+
+        # fill background with the widget's default style
         painter = QPainter(self._canvas)
         opt = QStyleOption()
         opt.initFrom(self._canvas)
@@ -121,6 +164,7 @@ class ImageViewer(QScrollArea):
         if self._image is None:
             return
 
+        # scale image to current zoom level
         scaled = self._image.scaled(
             int(self._image.width() * self._zoom),
             int(self._image.height() * self._zoom),
@@ -128,33 +172,35 @@ class ImageViewer(QScrollArea):
             Qt.SmoothTransformation,
         )
 
+        # ── No line selected: draw everything normally ──
         if self._selected_index < 0:
             painter.drawImage(0, 0, scaled)
+            painter.setOpacity(0.5)
             pen_all = QPen(QColor(0, 255, 136), 2)
             painter.setPen(pen_all)
             for line in self._lines:
-                poly = line.get("polygon", [])
-                if len(poly) == 4:
-                    qpts = [QPointF(p[0] * self._zoom, p[1] * self._zoom) for p in poly]
-                    painter.drawPolygon(QPolygonF(qpts))
+                pts = self._get_shape_points(line)
+                if pts:
+                    self._draw_shape(painter, pts)
             return
 
-        sel_poly = self._lines[self._selected_index].get("polygon", [])
-        if len(sel_poly) != 4:
+        # ── A specific line is selected: dim everything outside it ──
+        sel_pts = self._get_shape_points(self._lines[self._selected_index])
+        if not sel_pts:
             return
 
-        sel_qpts = [QPointF(p[0] * self._zoom, p[1] * self._zoom) for p in sel_poly]
-
-        sel_path = QPainterPath()
-        sel_path.addPolygon(QPolygonF(sel_qpts))
+        # build a clip path: everything outside the selected shape
+        sel_path = self._build_selection_path(sel_pts)
 
         full_path = QPainterPath()
         full_path.addRect(0, 0, scaled.width(), scaled.height())
 
         outside_path = full_path - sel_path
 
+        # draw the full image first
         painter.drawImage(0, 0, scaled)
 
+        # clear the outside region to white, then redraw it at 50 % opacity
         painter.setCompositionMode(QPainter.CompositionMode_Clear)
         painter.setClipPath(outside_path)
         painter.fillRect(0, 0, scaled.width(), scaled.height(), Qt.white)
@@ -164,42 +210,43 @@ class ImageViewer(QScrollArea):
         painter.setOpacity(0.5)
         painter.drawImage(0, 0, scaled)
 
+        # restore normal blending for overlay drawing
         painter.setOpacity(1.0)
         painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
 
+        # draw non-selected line shapes (green) – both outside and inside the selection
         painter.setClipPath(outside_path)
-        painter.setOpacity(0.8)
+        painter.setOpacity(0.3)
         pen_all = QPen(QColor(0, 255, 136), 2)
         painter.setPen(pen_all)
         for i, line in enumerate(self._lines):
             if i == self._selected_index:
                 continue
-            poly = line.get("polygon", [])
-            if len(poly) == 4:
-                qpts = [QPointF(p[0] * self._zoom, p[1] * self._zoom) for p in poly]
-                painter.drawPolygon(QPolygonF(qpts))
+            pts = self._get_shape_points(line)
+            if pts:
+                self._draw_shape(painter, pts)
 
         painter.setClipPath(sel_path)
-        painter.setOpacity(1.0)
+        painter.setOpacity(0.3)
         pen_all_full = QPen(QColor(0, 255, 136), 2)
         painter.setPen(pen_all_full)
         for i, line in enumerate(self._lines):
             if i == self._selected_index:
                 continue
-            poly = line.get("polygon", [])
-            if len(poly) == 4:
-                qpts = [QPointF(p[0] * self._zoom, p[1] * self._zoom) for p in poly]
-                painter.drawPolygon(QPolygonF(qpts))
+            pts = self._get_shape_points(line)
+            if pts:
+                self._draw_shape(painter, pts)
 
+        # draw the selected line shape (red) – both outside and inside
         painter.setClipPath(outside_path)
-        painter.setOpacity(0.8)
+        painter.setOpacity(0.2)
         painter.setPen(QPen(QColor(255, 68, 68), 3))
-        painter.drawPolygon(QPolygonF(sel_qpts))
+        self._draw_shape(painter, sel_pts)
 
         painter.setClipPath(sel_path)
-        painter.setOpacity(1.0)
+        painter.setOpacity(0.2)
         painter.setPen(QPen(QColor(255, 68, 68), 3))
-        painter.drawPolygon(QPolygonF(sel_qpts))
+        self._draw_shape(painter, sel_pts)
 
     def _on_mouse_press(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
@@ -225,10 +272,16 @@ class ImageViewer(QScrollArea):
 
     def _hit_test_lines(self, pos: QPointF) -> int:
         for i, line in enumerate(self._lines):
-            poly = line.get("polygon", [])
-            if len(poly) == 4:
-                pts = [(p[0] * self._zoom, p[1] * self._zoom) for p in poly]
-                if self._point_in_polygon(pos.x(), pos.y(), pts):
+            pts = self._get_shape_points(line)
+            if not pts:
+                continue
+            if self._show_boxes:
+                x1, y1, x2, y2 = pts[0][0], pts[0][1], pts[2][0], pts[2][1]
+                if x1 * self._zoom <= pos.x() <= x2 * self._zoom and y1 * self._zoom <= pos.y() <= y2 * self._zoom:
+                    return i
+            else:
+                scaled_pts = [(p[0] * self._zoom, p[1] * self._zoom) for p in pts]
+                if self._point_in_polygon(pos.x(), pos.y(), scaled_pts):
                     return i
         return -1
 
@@ -276,15 +329,13 @@ class OCRViewer(QMainWindow):
         self._loading_model = False
 
         self._original_image = None
-        self._modified_image = None
-        self._image_is_modified = False
-        self._temp_image_path = None
 
         self.setWindowTitle(f"OCR Debug Viewer - {output_path}")
-        self.resize(1400, 900)
 
         self._load_data()
         self._build_ui()
+        self._restore_settings()
+        self._select_first_page()
 
     def _load_data(self):
         submissions_csv = self.output_dir / "submissions.csv"
@@ -339,8 +390,8 @@ class OCRViewer(QMainWindow):
         self.image_viewer = ImageViewer()
         self.image_viewer._on_zoom_change = self._update_zoom_ui_from_viewer
 
-        splitter = QSplitter(Qt.Horizontal)
-        layout.addWidget(splitter)
+        self._splitter = QSplitter(Qt.Horizontal)
+        layout.addWidget(self._splitter)
 
         left_splitter = QSplitter(Qt.Vertical)
 
@@ -361,7 +412,7 @@ class OCRViewer(QMainWindow):
         left_splitter.setStretchFactor(0, 2)
         left_splitter.setStretchFactor(1, 1)
 
-        splitter.addWidget(left_splitter)
+        self._splitter.addWidget(left_splitter)
 
         right_frame = QWidget()
         right_layout = QVBoxLayout(right_frame)
@@ -404,41 +455,17 @@ class OCRViewer(QMainWindow):
         self.zoom_label.setAlignment(Qt.AlignCenter)
         zoom_layout.addWidget(self.zoom_label)
 
+        zoom_layout.addSpacing(10)
+
+        self.btn_mode = QPushButton("Polygons")
+        self.btn_mode.setFixedWidth(80)
+        self.btn_mode.setCheckable(True)
+        self.btn_mode.clicked.connect(self._toggle_display_mode)
+        zoom_layout.addWidget(self.btn_mode)
+
         zoom_layout.addStretch()
 
         right_layout.addWidget(zoom_bar)
-
-        image_control_bar = QFrame()
-        image_control_bar.setFrameShape(QFrame.StyledPanel)
-        image_control_layout = QHBoxLayout(image_control_bar)
-        image_control_layout.setContentsMargins(4, 2, 4, 2)
-
-        lbl_bin_thresh = QLabel("Thresh:")
-        lbl_bin_thresh.setFixedWidth(45)
-        image_control_layout.addWidget(lbl_bin_thresh)
-        self.spin_bin_thresh = QSpinBox()
-        self.spin_bin_thresh.setRange(0, 255)
-        self.spin_bin_thresh.setValue(128)
-        self.spin_bin_thresh.setFixedWidth(60)
-        image_control_layout.addWidget(self.spin_bin_thresh)
-
-        self.btn_binarize = QPushButton("Binarize")
-        self.btn_binarize.setFixedWidth(70)
-        self.btn_binarize.clicked.connect(self._binarize_image)
-        image_control_layout.addWidget(self.btn_binarize)
-
-        self.btn_reset_image = QPushButton("Reset")
-        self.btn_reset_image.setFixedWidth(50)
-        self.btn_reset_image.clicked.connect(self._reset_image)
-        image_control_layout.addWidget(self.btn_reset_image)
-
-        self.lbl_image_status = QLabel("Original")
-        self.lbl_image_status.setFixedWidth(80)
-        image_control_layout.addWidget(self.lbl_image_status)
-
-        image_control_layout.addStretch()
-
-        right_layout.addWidget(image_control_bar)
 
         default_text_thresh, default_blank_thresh = self._load_thresh_defaults()
 
@@ -466,6 +493,19 @@ class OCRViewer(QMainWindow):
         self.spin_blank_thresh.setValue(default_blank_thresh)
         self.spin_blank_thresh.setFixedWidth(70)
         test_layout.addWidget(self.spin_blank_thresh)
+
+        lbl_target_width = QLabel("Target Width:")
+        lbl_target_width.setFixedWidth(75)
+        test_layout.addWidget(lbl_target_width)
+        self.spin_target_width = QDoubleSpinBox()
+        self.spin_target_width.setDecimals(0)
+        self.spin_target_width.setRange(100, 20000)
+        self.spin_target_width.setSingleStep(100)
+        self.spin_target_width.setValue(3000)
+        self.spin_target_width.setFixedWidth(80)
+        test_layout.addWidget(self.spin_target_width)
+
+        test_layout.addSpacing(10)
 
         lbl_joining = QLabel("Joining:")
         lbl_joining.setFixedWidth(50)
@@ -539,11 +579,16 @@ class OCRViewer(QMainWindow):
         right_layout.addWidget(test_panel)
         right_layout.addWidget(self.image_viewer)
 
-        splitter.addWidget(right_frame)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
+        self._splitter.addWidget(right_frame)
+        self._splitter.setStretchFactor(0, 1)
+        self._splitter.setStretchFactor(1, 3)
 
         self._populate_tree()
+
+    def _toggle_display_mode(self):
+        show_boxes = self.btn_mode.isChecked()
+        self.btn_mode.setText("Boxes" if show_boxes else "Polygons")
+        self.image_viewer.set_display_mode(show_boxes)
 
     def _on_zoom_slider(self, value):
         zoom = value / 100.0
@@ -583,6 +628,23 @@ class OCRViewer(QMainWindow):
 
         self.tree.expandAll()
 
+    def _select_first_page(self):
+        item = self.tree.topLevelItem(0)
+        if item is None:
+            return
+        doc_item = item.child(0)
+        if doc_item is None:
+            return
+        page_item = doc_item.child(0)
+        if page_item is None:
+            return
+        self.tree.setCurrentItem(page_item)
+        self._on_tree_select()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.image_viewer.fit_to_view()
+
     def _on_tree_select(self):
         sel = self.tree.selectedItems()
         if not sel:
@@ -602,11 +664,6 @@ class OCRViewer(QMainWindow):
         self._current_submission_id = submission_id
 
         self._original_image = QImage(str(img_path))
-        self._modified_image = None
-        self._image_is_modified = False
-        if self._temp_image_path and os.path.exists(self._temp_image_path):
-            os.unlink(self._temp_image_path)
-        self._temp_image_path = None
 
         self.base_lines = []
         if lines_path.exists():
@@ -618,6 +675,7 @@ class OCRViewer(QMainWindow):
         self._use_test = False
 
         self._update_lines_display()
+        self.image_viewer.fit_to_view()
 
     def _get_current_lines(self) -> list[dict]:
         return self.test_lines if self._use_test else self.base_lines
@@ -625,46 +683,19 @@ class OCRViewer(QMainWindow):
     def _update_lines_display(self):
         lines = self._get_current_lines()
         current_zoom = self.image_viewer._zoom
-        display_image = self._modified_image if self._image_is_modified else self._original_image
-        if display_image is not None:
-            self.image_viewer.set_image_and_lines(display_image, lines)
+        if self._original_image is not None:
+            self.image_viewer.set_image_and_lines(self._original_image, lines)
         self.image_viewer.set_zoom(current_zoom)
         self._populate_lines()
         mode = "Test" if self._use_test else "Base"
         self.lbl_mode.setText(f"Mode: {mode}")
         self.btn_toggle_base.setText("Show Base" if self._use_test else "Show Test")
-        self.lbl_image_status.setText("Modified" if self._image_is_modified else "Original")
 
     def _toggle_base_test(self):
         if not self.test_lines:
             QMessageBox.information(self, "No Test Result", "Run detection first.")
             return
         self._use_test = not self._use_test
-        self._update_lines_display()
-
-    def _binarize_image(self):
-        if self._original_image is None:
-            return
-        threshold = self.spin_bin_thresh.value()
-
-        self._modified_image = self._original_image.convertToFormat(QImage.Format_Grayscale8)
-        for y in range(self._modified_image.height()):
-            for x in range(self._modified_image.width()):
-                pixel = self._modified_image.pixelColor(x, y)
-                gray = pixel.red()
-                if gray < threshold:
-                    self._modified_image.setPixelColor(x, y, QColor(0, 0, 0))
-                else:
-                    self._modified_image.setPixelColor(x, y, QColor(255, 255, 255))
-        self._image_is_modified = True
-        self._update_lines_display()
-
-    def _reset_image(self):
-        self._modified_image = None
-        self._image_is_modified = False
-        if self._temp_image_path and os.path.exists(self._temp_image_path):
-            os.unlink(self._temp_image_path)
-        self._temp_image_path = None
         self._update_lines_display()
 
     def _run_surya_detection(self):
@@ -682,21 +713,37 @@ class OCRViewer(QMainWindow):
             try:
                 text_thresh = self.spin_text_thresh.value()
                 blank_thresh = self.spin_blank_thresh.value()
+                target_width = int(self.spin_target_width.value())
                 model = init_surya_model(text_threshold=text_thresh, blank_threshold=blank_thresh)
                 with self._model_lock:
                     self._surya_model = model
 
-                if self._image_is_modified and self._modified_image is not None:
-                    temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                    self._modified_image.save(temp_file.name)
-                    img_path_for_detection = temp_file.name
-                else:
-                    img_path_for_detection = str(self._current_img_path)
+                orig_img = QImage(str(self._current_img_path))
+                orig_w = orig_img.width()
+                img = orig_img
+                if orig_w != target_width:
+                    new_h = int(orig_img.height() * target_width / orig_w)
+                    img = orig_img.scaled(
+                        target_width, new_h,
+                        Qt.IgnoreAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                tmp_path = tmp.name
+                img.save(tmp_path, "PNG")
+                tmp.close()
 
-                result = extract_lines(img_path_for_detection, model)
+                result = extract_lines(tmp_path, model)
 
-                if self._image_is_modified and self._modified_image is not None:
-                    os.unlink(img_path_for_detection)
+                scale = orig_w / img.width()
+                if scale != 1.0:
+                    for line in result["lines"]:
+                        bbox = line.get("bbox")
+                        if bbox and len(bbox) == 4:
+                            line["bbox"] = [v * scale for v in bbox]
+                        poly = line.get("polygon")
+                        if poly:
+                            line["polygon"] = [[p[0] * scale, p[1] * scale] for p in poly]
 
                 from PySide6.QtCore import QCoreApplication
                 QCoreApplication.postEvent(self, _DetectionDoneEvent(result["lines"]))
@@ -738,6 +785,36 @@ class OCRViewer(QMainWindow):
         default_text, default_blank = self._load_thresh_defaults()
         self.spin_text_thresh.setValue(default_text)
         self.spin_blank_thresh.setValue(default_blank)
+
+    def _save_settings(self):
+        settings = QSettings("transcriptor", "ocr_viewer")
+        settings.setValue("geometry", self.saveGeometry())
+        settings.setValue("maximized", self.isMaximized())
+        settings.setValue("splitter", self._splitter.saveState())
+        screen = self.screen()
+        if screen:
+            settings.setValue("screenSize", screen.size())
+
+    def _restore_settings(self):
+        settings = QSettings("transcriptor", "ocr_viewer")
+        geom = settings.value("geometry")
+        maximized = settings.value("maximized", False, type=bool)
+        splitter = settings.value("splitter")
+        saved_screen = settings.value("screenSize")
+        if geom and saved_screen:
+            current_screen = self.screen()
+            if current_screen and saved_screen == current_screen.size():
+                self.restoreGeometry(geom)
+                if maximized:
+                    self.showMaximized()
+                if splitter:
+                    self._splitter.restoreState(splitter)
+                return
+        self.showMaximized()
+
+    def closeEvent(self, event):
+        self._save_settings()
+        super().closeEvent(event)
 
     def _on_detection_done(self, lines: list[dict]):
         self._loading_model = False

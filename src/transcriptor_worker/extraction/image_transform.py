@@ -145,7 +145,7 @@ def _detect_rotation(image_bytes: bytes) -> int | None:
     return None
 
 
-MAX_DIMENSION = 2048
+MAX_DIMENSION = int(os.environ.get("IMAGE_TRANSFORM_MAX_DIMENSION", "1024"))
 
 
 def _apply_resize(image_bytes: bytes, image_format: str) -> tuple[bytes, tuple[int, int] | None]:

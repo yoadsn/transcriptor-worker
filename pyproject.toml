@@ -15,7 +15,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov"]
-debug = ["pyside6"]
+debug = [
+    "pyside6",
+]
 
 [project.scripts]
 transcriptor-worker = "transcriptor_worker.main:main"
