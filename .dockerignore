@@ -1,0 +1,43 @@
+# Git
+.git
+.gitignore
+
+# Python caches / build artifacts
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments (rebuilt inside the image)
+.venv
+.venv/
+
+# Tests & their caches
+tests/
+.pytest_cache/
+pytest*
+pytest-of-*/
+
+# Tooling caches
+uv-*.lock
+torchinductor*/
+
+# Local data & outputs
+data
+data/
+
+# Env files (config is injected at runtime)
+.env
+.env.*
+!.env.example
+
+# Editor / OS cruft
+.DS_Store
+
+# Docs & planning not needed at runtime
+planning/
+# NOTE: debug/ is intentionally NOT ignored — pyproject declares it as a
+# hatchling wheel package target, so it must be present for the project build
+# to succeed. It's only copied into the builder stage, never the runtime image.
