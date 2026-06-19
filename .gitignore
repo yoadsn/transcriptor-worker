@@ -24,3 +24,6 @@ data/
 # env files
 .env*
 !.env.example
+
+# torch cache
+torchinductor*/
