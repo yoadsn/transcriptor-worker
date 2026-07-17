@@ -38,6 +38,7 @@ def _make_config(max_submissions: int | None = None) -> MagicMock:
     cfg.max_submissions = max_submissions
     cfg.detector_text_threshold = None
     cfg.detector_blank_threshold = None
+    cfg.submitter_fingerprint_salt = ""
     return cfg
 
 

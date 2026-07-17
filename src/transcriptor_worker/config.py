@@ -43,6 +43,9 @@ class Config:
     detector_text_threshold: float | None
     detector_blank_threshold: float | None
 
+    # Submitter fingerprint salt (empty string = no salt)
+    submitter_fingerprint_salt: str
+
     # Local temp directory for page images during a run
     temp_dir: str
 
@@ -135,5 +138,6 @@ class Config:
             force_reprocess=optional_bool("FORCE_REPROCESS"),
             detector_text_threshold=optional_float("DETECTOR_TEXT_THRESHOLD"),
             detector_blank_threshold=optional_float("DETECTOR_BLANK_THRESHOLD"),
+            submitter_fingerprint_salt=e.get("SUBMITTER_FINGERPRINT_SALT", ""),
             temp_dir=e.get("TEMP_DIR", "").strip() or tempfile.gettempdir(),
         )

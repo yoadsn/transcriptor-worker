@@ -338,7 +338,11 @@ def run() -> None:
     with ctx.Pool(
         processes=config.worker_parallelism,
         initializer=init_worker,
-        initargs=(config.detector_text_threshold, config.detector_blank_threshold),
+        initargs=(
+            config.detector_text_threshold,
+            config.detector_blank_threshold,
+            config.submitter_fingerprint_salt,
+        ),
     ) as pool:
         for sub_record, page_records in pool.imap_unordered(worker_fn, work_queue):
             new_sub_records.append(sub_record)

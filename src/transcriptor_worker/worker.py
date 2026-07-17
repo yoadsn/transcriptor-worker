@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _surya_model: Any = None
+_submitter_fingerprint_salt: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +84,7 @@ def _build_backend(cfg: StorageConfig) -> tuple[StorageBackend, str]:
 def init_worker(
     text_threshold: float | None,
     blank_threshold: float | None,
+    submitter_fingerprint_salt: str = "",
 ) -> None:
     """Sub-process initializer: load the Surya model once and store it globally.
 
@@ -95,8 +97,10 @@ def init_worker(
     Args:
         text_threshold: Passed to :func:`~transcriptor_worker.extraction.lines.init_surya_model`.
         blank_threshold: Passed to :func:`~transcriptor_worker.extraction.lines.init_surya_model`.
+        submitter_fingerprint_salt: Salt for the submitter fingerprint hash.
     """
-    global _surya_model
+    global _surya_model, _submitter_fingerprint_salt
+    _submitter_fingerprint_salt = submitter_fingerprint_salt
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
@@ -250,12 +254,22 @@ def process_submission(
     # Stage 3: extract form_metadata from desc.json → metadata.json
     # ------------------------------------------------------------------
     try:
+        import hashlib
         import json as _json
 
         desc_src_path = f"{submission.source_path}/desc.json"
         desc_bytes = source_storage.read_bytes(desc_src_path)
         desc = _json.loads(desc_bytes)
         metadata = desc.get("form_metadata", {})
+
+        user_email = (desc.get("user") or {}).get("email")
+        if user_email:
+            normalized_email = user_email.strip().lower()
+            fingerprint = hashlib.sha256(
+                (_submitter_fingerprint_salt + normalized_email).encode()
+            ).hexdigest()
+            metadata["submitter_fingerprint"] = fingerprint
+
         metadata_target_path = f"{submission.id}/metadata.json"
         target_storage.write_text(
             metadata_target_path, _json.dumps(metadata, ensure_ascii=False, indent=2)
