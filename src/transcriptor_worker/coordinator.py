@@ -246,7 +246,7 @@ def run() -> None:
         target_storage,
         source_prefix,
         target_prefix,
-        force_reprocess=config.force_reprocess,
+        force_reprocess=config.force_reprocess or config.force_reprocess_metadata,
     )
 
     if config.max_submissions is not None:
@@ -266,24 +266,29 @@ def run() -> None:
     # ------------------------------------------------------------------
     # Carry forward already-completed page records from target manifest
     # so the final CSV is a full picture, not just this run's output.
+    # Skipped in metadata-only mode (manifests are not touched).
     # ------------------------------------------------------------------
-    pages_csv_path = (
-        f"{target_prefix}/pages.csv" if target_prefix else "pages.csv"
-    )
-    existing_pages = load_pages_csv(target_storage, pages_csv_path)
-    submissions_csv_path = (
-        f"{target_prefix}/submissions.csv" if target_prefix else "submissions.csv"
-    )
-    existing_submissions = load_submissions_csv(target_storage, submissions_csv_path)
+    carried_sub_records: list[SubmissionRecord] = []
+    carried_page_records: list[PageRecord] = []
 
-    # Carry-forward rows for submissions we are NOT re-processing.
-    work_ids = {s.id for s in work_queue}
-    carried_sub_records: list[SubmissionRecord] = [
-        r for r in existing_submissions.values() if r.submission_id not in work_ids
-    ]
-    carried_page_records: list[PageRecord] = [
-        r for r in existing_pages if r.submission_id not in work_ids
-    ]
+    if not config.force_reprocess_metadata:
+        pages_csv_path = (
+            f"{target_prefix}/pages.csv" if target_prefix else "pages.csv"
+        )
+        existing_pages = load_pages_csv(target_storage, pages_csv_path)
+        submissions_csv_path = (
+            f"{target_prefix}/submissions.csv" if target_prefix else "submissions.csv"
+        )
+        existing_submissions = load_submissions_csv(target_storage, submissions_csv_path)
+
+        # Carry-forward rows for submissions we are NOT re-processing.
+        work_ids = {s.id for s in work_queue}
+        carried_sub_records = [
+            r for r in existing_submissions.values() if r.submission_id not in work_ids
+        ]
+        carried_page_records = [
+            r for r in existing_pages if r.submission_id not in work_ids
+        ]
 
     # ------------------------------------------------------------------
     # Build picklable storage configs for worker sub-processes.
@@ -342,6 +347,7 @@ def run() -> None:
             config.detector_text_threshold,
             config.detector_blank_threshold,
             config.submitter_fingerprint_salt,
+            config.force_reprocess_metadata,
         ),
     ) as pool:
         for sub_record, page_records in pool.imap_unordered(worker_fn, work_queue):
@@ -356,12 +362,14 @@ def run() -> None:
 
     # ------------------------------------------------------------------
     # Write final manifests to target storage.
+    # Skipped in metadata-only mode (manifests are not touched).
     # ------------------------------------------------------------------
-    all_sub_records = carried_sub_records + new_sub_records
-    all_page_records = carried_page_records + new_page_records
+    if not config.force_reprocess_metadata:
+        all_sub_records = carried_sub_records + new_sub_records
+        all_page_records = carried_page_records + new_page_records
 
-    save_submissions_csv(all_sub_records, target_storage, submissions_csv_path)
-    save_pages_csv(all_page_records, target_storage, pages_csv_path)
+        save_submissions_csv(all_sub_records, target_storage, submissions_csv_path)
+        save_pages_csv(all_page_records, target_storage, pages_csv_path)
 
     completed = sum(1 for r in new_sub_records if r.status == "completed")
     failed = sum(1 for r in new_sub_records if r.status == "failed")

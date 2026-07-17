@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 _surya_model: Any = None
 _submitter_fingerprint_salt: str = ""
+_force_reprocess_metadata: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +86,7 @@ def init_worker(
     text_threshold: float | None,
     blank_threshold: float | None,
     submitter_fingerprint_salt: str = "",
+    force_reprocess_metadata: bool = False,
 ) -> None:
     """Sub-process initializer: load the Surya model once and store it globally.
 
@@ -98,9 +100,11 @@ def init_worker(
         text_threshold: Passed to :func:`~transcriptor_worker.extraction.lines.init_surya_model`.
         blank_threshold: Passed to :func:`~transcriptor_worker.extraction.lines.init_surya_model`.
         submitter_fingerprint_salt: Salt for the submitter fingerprint hash.
+        force_reprocess_metadata: If True, only write metadata.json (skip pages/lines).
     """
-    global _surya_model, _submitter_fingerprint_salt
+    global _surya_model, _submitter_fingerprint_salt, _force_reprocess_metadata
     _submitter_fingerprint_salt = submitter_fingerprint_salt
+    _force_reprocess_metadata = force_reprocess_metadata
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
@@ -176,79 +180,87 @@ def process_submission(
     # ------------------------------------------------------------------
     # Stage 1: page extraction
     # ------------------------------------------------------------------
-    try:
-        pages_result = extract_pages(
-            submission, source_storage, target_storage, temp_dir
-        )
-        page_records = pages_result.page_records
-    except Exception as exc:
-        logger.error(
-            "Page extraction failed for submission %s: %s",
+    if _force_reprocess_metadata:
+        logger.info(
+            "Metadata-only mode: skipping page extraction for submission %s",
             submission.id,
-            traceback.format_exc(),
         )
-        return (
-            SubmissionRecord(
-                submission_id=submission.id,
-                status="failed",
-                error=f"Page extraction error: {exc}",
-            ),
-            [],
-        )
-
-    # ------------------------------------------------------------------
-    # Write transforms.json back to source storage
-    # ------------------------------------------------------------------
-    if pages_result.transforms:
+        page_records: list[PageRecord] = []
+        updated_records: list[PageRecord] = []
+    else:
         try:
-            import json as _json
-
-            transforms_src_path = f"{submission.source_path}/transforms.json"
-            source_storage.write_text(
-                transforms_src_path,
-                _json.dumps(pages_result.transforms, ensure_ascii=False, indent=2),
+            pages_result = extract_pages(
+                submission, source_storage, target_storage, temp_dir
             )
-            logger.info(
-                "Wrote transforms.json to %s for submission %s",
-                transforms_src_path,
-                submission.id,
-            )
+            page_records = pages_result.page_records
         except Exception as exc:
-            logger.warning(
-                "Failed to write transforms.json for submission %s: %s",
+            logger.error(
+                "Page extraction failed for submission %s: %s",
                 submission.id,
-                exc,
+                traceback.format_exc(),
+            )
+            return (
+                SubmissionRecord(
+                    submission_id=submission.id,
+                    status="failed",
+                    error=f"Page extraction error: {exc}",
+                ),
+                [],
             )
 
-    # ------------------------------------------------------------------
-    # Stage 2: line extraction on successfully extracted pages
-    # ------------------------------------------------------------------
-    updated_records: list[PageRecord] = []
-    for pr in page_records:
-        if pr.status != "pending" or not pr.image_filename:
-            # Pass through failed / already-processed records unchanged.
-            updated_records.append(pr)
-            continue
+        # ------------------------------------------------------------------
+        # Write transforms.json back to source storage
+        # ------------------------------------------------------------------
+        if pages_result.transforms:
+            try:
+                import json as _json
 
-        try:
-            updated = process_page_lines(pr, _surya_model, target_storage, temp_dir)
-        except Exception as exc:
-            logger.warning(
-                "Line extraction failed for %s/%s: %s",
-                submission.id,
-                pr.image_filename,
-                exc,
-            )
-            updated = PageRecord(
-                submission_id=pr.submission_id,
-                doc_filename=pr.doc_filename,
-                page_number=pr.page_number,
-                status="failed",
-                error=f"Line extraction error: {exc}",
-                image_filename=pr.image_filename,
-                lines_filename="",
-            )
-        updated_records.append(updated)
+                transforms_src_path = f"{submission.source_path}/transforms.json"
+                source_storage.write_text(
+                    transforms_src_path,
+                    _json.dumps(pages_result.transforms, ensure_ascii=False, indent=2),
+                )
+                logger.info(
+                    "Wrote transforms.json to %s for submission %s",
+                    transforms_src_path,
+                    submission.id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to write transforms.json for submission %s: %s",
+                    submission.id,
+                    exc,
+                )
+
+        # ------------------------------------------------------------------
+        # Stage 2: line extraction on successfully extracted pages
+        # ------------------------------------------------------------------
+        updated_records = []
+        for pr in page_records:
+            if pr.status != "pending" or not pr.image_filename:
+                # Pass through failed / already-processed records unchanged.
+                updated_records.append(pr)
+                continue
+
+            try:
+                updated = process_page_lines(pr, _surya_model, target_storage, temp_dir)
+            except Exception as exc:
+                logger.warning(
+                    "Line extraction failed for %s/%s: %s",
+                    submission.id,
+                    pr.image_filename,
+                    exc,
+                )
+                updated = PageRecord(
+                    submission_id=pr.submission_id,
+                    doc_filename=pr.doc_filename,
+                    page_number=pr.page_number,
+                    status="failed",
+                    error=f"Line extraction error: {exc}",
+                    image_filename=pr.image_filename,
+                    lines_filename="",
+                )
+            updated_records.append(updated)
 
     # ------------------------------------------------------------------
     # Stage 3: extract form_metadata from desc.json → metadata.json

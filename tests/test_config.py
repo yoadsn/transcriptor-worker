@@ -226,3 +226,34 @@ class TestForceReprocess:
     def test_random_string(self):
         cfg = Config.from_env(_env(FORCE_REPROCESS="anything"))
         assert cfg.force_reprocess is False
+
+
+# ---------------------------------------------------------------------------
+# FORCE_REPROCESS_METADATA tests
+# ---------------------------------------------------------------------------
+
+
+class TestForceReprocessMetadata:
+    def test_default_is_false(self):
+        cfg = Config.from_env(_env())
+        assert cfg.force_reprocess_metadata is False
+
+    def test_true_value(self):
+        cfg = Config.from_env(_env(FORCE_REPROCESS_METADATA="true"))
+        assert cfg.force_reprocess_metadata is True
+
+    def test_1_value(self):
+        cfg = Config.from_env(_env(FORCE_REPROCESS_METADATA="1"))
+        assert cfg.force_reprocess_metadata is True
+
+    def test_yes_value(self):
+        cfg = Config.from_env(_env(FORCE_REPROCESS_METADATA="yes"))
+        assert cfg.force_reprocess_metadata is True
+
+    def test_false_value(self):
+        cfg = Config.from_env(_env(FORCE_REPROCESS_METADATA="false"))
+        assert cfg.force_reprocess_metadata is False
+
+    def test_empty_value(self):
+        cfg = Config.from_env(_env(FORCE_REPROCESS_METADATA=""))
+        assert cfg.force_reprocess_metadata is False
