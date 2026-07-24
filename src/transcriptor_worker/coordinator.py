@@ -212,6 +212,12 @@ def run() -> None:
 
     logger.info("Starting transcriptor-worker coordinator")
 
+    if config.backfill_raw_images:
+        from transcriptor_worker.backfill import run_backfill
+
+        run_backfill(config)
+        return
+
     source_storage, source_prefix = _build_storage(
         config.source_storage_type,
         config.source_storage_path,

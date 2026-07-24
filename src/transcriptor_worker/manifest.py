@@ -20,6 +20,9 @@ _PAGE_FIELDS = [
     "error",
     "image_filename",
     "lines_filename",
+    "raw_image_filename",
+    "raw_image_width",
+    "raw_image_height",
 ]
 
 

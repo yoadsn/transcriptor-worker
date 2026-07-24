@@ -39,6 +39,7 @@ class Config:
     max_submissions: int | None  # None = process all pending submissions
     force_reprocess: bool  # True = reprocess already-completed submissions
     force_reprocess_metadata: bool  # True = reprocess metadata.json only (no pages/manifests)
+    backfill_raw_images: bool  # True = backfill raw AVIF images for existing target pages only
 
     # Surya detection thresholds (None = use library defaults)
     detector_text_threshold: float | None
@@ -138,6 +139,7 @@ class Config:
             max_submissions=optional_int("MAX_SUBMISSIONS"),
             force_reprocess=optional_bool("FORCE_REPROCESS"),
             force_reprocess_metadata=optional_bool("FORCE_REPROCESS_METADATA"),
+            backfill_raw_images=optional_bool("BACKFILL_RAW_IMAGES"),
             detector_text_threshold=optional_float("DETECTOR_TEXT_THRESHOLD"),
             detector_blank_threshold=optional_float("DETECTOR_BLANK_THRESHOLD"),
             submitter_fingerprint_salt=e.get("SUBMITTER_FINGERPRINT_SALT", ""),

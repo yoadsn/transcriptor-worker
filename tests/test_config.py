@@ -257,3 +257,30 @@ class TestForceReprocessMetadata:
     def test_empty_value(self):
         cfg = Config.from_env(_env(FORCE_REPROCESS_METADATA=""))
         assert cfg.force_reprocess_metadata is False
+
+
+# ---------------------------------------------------------------------------
+# BACKFILL_RAW_IMAGES tests
+# ---------------------------------------------------------------------------
+
+
+class TestBackfillRawImages:
+    def test_default_is_false(self):
+        cfg = Config.from_env(_env())
+        assert cfg.backfill_raw_images is False
+
+    def test_true_value(self):
+        cfg = Config.from_env(_env(BACKFILL_RAW_IMAGES="true"))
+        assert cfg.backfill_raw_images is True
+
+    def test_1_value(self):
+        cfg = Config.from_env(_env(BACKFILL_RAW_IMAGES="1"))
+        assert cfg.backfill_raw_images is True
+
+    def test_false_value(self):
+        cfg = Config.from_env(_env(BACKFILL_RAW_IMAGES="false"))
+        assert cfg.backfill_raw_images is False
+
+    def test_empty_value(self):
+        cfg = Config.from_env(_env(BACKFILL_RAW_IMAGES=""))
+        assert cfg.backfill_raw_images is False

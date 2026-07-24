@@ -19,10 +19,20 @@ Rotation results are cached in a ``transforms.json`` file written back to
 the source storage so that subsequent runs can skip the expensive detection
 step.
 
+In addition to the resized/rotated "derived" image (used by the rest of
+the pipeline for line detection etc.), this module also builds a "raw"
+image: the full, pre-resize resolution, rotated by the same amount as the
+derived image so both share the same final orientation, encoded as AVIF
+to keep the larger pixel count from ballooning storage size.
+
 Usage::
 
-    transformed, applied = transform_image(raw_bytes, "jpeg", transforms=cached_list)
+    transformed, raw_image, applied = transform_image(
+        raw_bytes, "jpeg", transforms=cached_list
+    )
     storage.write_bytes(path, transformed)
+    if raw_image is not None:
+        storage.write_bytes(raw_path, raw_image["bytes"])
 """
 
 from __future__ import annotations
@@ -32,9 +42,13 @@ import logging
 import os
 from typing import Any
 
+import pillow_avif  # noqa: F401 — registers the AVIF codec with Pillow
 from PIL import Image, ImageOps
 
 logger = logging.getLogger(__name__)
+
+# Format/extension used for the full-resolution "raw" image upload.
+RAW_IMAGE_FORMAT = "AVIF"
 
 
 def _normalize_angle(angle: float) -> int:
@@ -229,11 +243,65 @@ def _apply_rotation(image_bytes: bytes, image_format: str, rotation: int) -> byt
         return image_bytes
 
 
+def _build_raw_image(image_bytes: bytes, rotation: int) -> dict[str, Any] | None:
+    """Build the full-resolution "raw" image for upload.
+
+    Applies the same clockwise *rotation* used for the derived (resized)
+    image so both versions share the same final orientation, then encodes
+    the result as AVIF to keep file size manageable despite the higher
+    resolution.
+
+    Args:
+        image_bytes: Full-resolution image bytes, EXIF-transposed but
+            *not* resized (i.e. before :func:`_apply_resize` runs).
+        rotation: Clockwise rotation in degrees (0, 90, 180, or 270).
+
+    Returns:
+        ``{"bytes": <avif bytes>, "width": <int>, "height": <int>}`` or
+        ``None`` if the source bytes could not be parsed as an image.
+    """
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        if rotation:
+            img = img.rotate(-rotation, expand=True)
+        img = img.convert("RGB")
+        width, height = img.size
+        buf = io.BytesIO()
+        img.save(buf, format=RAW_IMAGE_FORMAT)
+        return {"bytes": buf.getvalue(), "width": width, "height": height}
+    except Exception as exc:
+        logger.warning("Failed to build raw AVIF image: %s", exc)
+        return None
+
+
+def build_raw_image(image_bytes: bytes, rotation: int) -> dict[str, Any] | None:
+    """Build the full-resolution raw AVIF image from original source bytes.
+
+    This is a lighter-weight entry point than :func:`transform_image` for
+    callers (e.g. the raw-image backfill job) that already know the target
+    rotation for a page — typically read back from a cached
+    ``transforms.json`` — and only need to (re)build the raw upload without
+    re-running rotation detection or resize.
+
+    Args:
+        image_bytes: Original, full-resolution image bytes as read from
+            source (not yet EXIF-transposed or resized).
+        rotation: Clockwise rotation in degrees (0, 90, 180, or 270) to
+            match a previously-derived image's final orientation.
+
+    Returns:
+        ``{"bytes": <avif bytes>, "width": <int>, "height": <int>}`` or
+        ``None`` if the source bytes could not be parsed as an image.
+    """
+    exif_applied = _apply_exif_transpose(image_bytes)
+    return _build_raw_image(exif_applied, rotation)
+
+
 def transform_image(
     image_bytes: bytes,
     image_format: str,
     transforms: list[dict[str, Any]] | None = None,
-) -> tuple[bytes, dict[str, Any]]:
+) -> tuple[bytes, dict[str, Any] | None, dict[str, Any]]:
     """Detect and correct image rotation, returning the processed bytes and applied transforms.
 
     Args:
@@ -244,7 +312,15 @@ def transform_image(
             ``FORCE_ROTATION_REDETECTION`` is set in the environment.
 
     Returns:
-        Tuple of (transformed image bytes, applied transforms dict).
+        Tuple of (transformed image bytes, raw image dict or None, applied
+        transforms dict).
+
+        The raw image dict has the form
+        ``{"bytes": <avif bytes>, "width": <int>, "height": <int>}`` and
+        represents the full, pre-resize resolution image rotated to match
+        the derived image's orientation and encoded as AVIF.  It is
+        ``None`` if the source bytes could not be parsed as an image.
+
         The applied transforms dict has the form
         ``{"rotation": <val>, "original_size": (w, h) | None}`` where
         ``<val>`` is 0, 90, 180, or 270.  If rotation could not be determined
@@ -253,6 +329,9 @@ def transform_image(
     """
     # Step 1: Apply EXIF orientation as physical pixel rotation
     image_bytes = _apply_exif_transpose(image_bytes)
+
+    # Keep the full-resolution (pre-resize) bytes for the raw upload.
+    raw_source_bytes = image_bytes
 
     # Step 2: Resize if any dimension exceeds MAX_DIMENSION
     image_bytes, original_size = _apply_resize(image_bytes, image_format)
@@ -277,7 +356,10 @@ def transform_image(
     # Step 5: Apply rotation
     result_bytes = _apply_rotation(image_bytes, image_format, rotation or 0)
 
+    # Step 6: Build the full-resolution raw image with matching rotation
+    raw_image = _build_raw_image(raw_source_bytes, rotation or 0)
+
     applied: dict[str, Any] = {"rotation": rotation}
     if original_size is not None:
         applied["original_size"] = original_size
-    return result_bytes, applied
+    return result_bytes, raw_image, applied

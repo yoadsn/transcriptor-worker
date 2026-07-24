@@ -63,8 +63,9 @@ RUN .venv/bin/python -c "from surya.detection import DetectionPredictor; Detecti
 #   tesseract-ocr / tesseract-ocr-osd : pytesseract OSD rotation detection
 #   libglib2.0-0                      : opencv-python-headless (surya) runtime
 #
-# pymupdf, boto3 and torch (CPU) ship self-contained wheels and need no extra
-# system packages.
+# pymupdf, boto3, torch (CPU) and pillow-avif-plugin (raw image AVIF encoding)
+# ship self-contained wheels (pillow-avif-plugin bundles libavif) and need no
+# extra system packages.
 ###############################################################################
 FROM python:3.13-slim-bookworm AS runtime
 

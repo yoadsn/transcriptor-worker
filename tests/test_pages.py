@@ -148,6 +148,30 @@ class TestPDFExtraction:
         assert tgt.exists("sub1/doc_p1.jpg")
         assert tgt.exists("sub1/doc_p2.jpg")
 
+    def test_pdf_raw_images_written_to_target(self, tmp_path, src, tgt, temp_dir):
+        pdf_bytes = TWO_PAGE_PDF.read_bytes()
+        _write_submission(
+            tmp_path,
+            "sub1",
+            {"doc.pdf": pdf_bytes},
+            [
+                {
+                    "stored_filename": "doc.pdf",
+                    "file_extension": ".pdf",
+                    "mime_type": None,
+                }
+            ],
+        )
+        submission = Submission(id="sub1", source_path="sub1")
+        result = extract_pages(submission, src, tgt, temp_dir)
+        records = sorted(result.page_records, key=lambda r: r.page_number)
+
+        assert tgt.exists("sub1/doc_p1.avif")
+        assert tgt.exists("sub1/doc_p2.avif")
+        assert records[0].raw_image_filename == "doc_p1.avif"
+        assert records[0].raw_image_width > 0
+        assert records[0].raw_image_height > 0
+
     def test_pdf_page_images_written_to_temp(self, tmp_path, src, tgt, temp_dir):
         pdf_bytes = TWO_PAGE_PDF.read_bytes()
         _write_submission(
@@ -280,6 +304,29 @@ class TestImagePassthrough:
         extract_pages(submission, src, tgt, temp_dir)
 
         assert tgt.exists("sub2/photo_p1.jpg")
+
+    def test_image_raw_written_to_target(self, tmp_path, src, tgt, temp_dir):
+        jpg_bytes = SAMPLE_JPG.read_bytes()
+        _write_submission(
+            tmp_path,
+            "sub2",
+            {"photo.jpg": jpg_bytes},
+            [
+                {
+                    "stored_filename": "photo.jpg",
+                    "file_extension": ".jpg",
+                    "mime_type": "image/jpeg",
+                }
+            ],
+        )
+        submission = Submission(id="sub2", source_path="sub2")
+        result = extract_pages(submission, src, tgt, temp_dir)
+        record = result.page_records[0]
+
+        assert tgt.exists("sub2/photo_p1.avif")
+        assert record.raw_image_filename == "photo_p1.avif"
+        assert record.raw_image_width > 0
+        assert record.raw_image_height > 0
 
     def test_image_output_is_valid_jpeg(self, tmp_path, src, tgt, temp_dir):
         jpg_bytes = SAMPLE_JPG.read_bytes()

@@ -16,6 +16,9 @@ JSON output format (one file per page)::
         "image_filename": "<stem>.jpg",
         "image_width": 2550,
         "image_height": 3300,
+        "raw_image_filename": "<stem>.avif",
+        "raw_image_width": 3600,
+        "raw_image_height": 4800,
         "lines": [
             {
                 "index": 0,
@@ -174,6 +177,9 @@ def process_page_lines(
             error="image_filename is empty; cannot run line extraction",
             image_filename=page_record.image_filename,
             lines_filename=page_record.lines_filename,
+            raw_image_filename=page_record.raw_image_filename,
+            raw_image_width=page_record.raw_image_width,
+            raw_image_height=page_record.raw_image_height,
         )
 
     image_filename = page_record.image_filename
@@ -212,6 +218,9 @@ def process_page_lines(
                 error=f"Cannot read image from target storage ({target_image_path}): {exc}",
                 image_filename=image_filename,
                 lines_filename="",
+                raw_image_filename=page_record.raw_image_filename,
+                raw_image_width=page_record.raw_image_width,
+                raw_image_height=page_record.raw_image_height,
             )
 
         # Write to temp so PIL / Surya can open it from disk.
@@ -238,6 +247,9 @@ def process_page_lines(
             error=f"Line extraction error: {exc}",
             image_filename=image_filename,
             lines_filename="",
+            raw_image_filename=page_record.raw_image_filename,
+            raw_image_width=page_record.raw_image_width,
+            raw_image_height=page_record.raw_image_height,
         )
     finally:
         # Clean up temp copy written solely for fallback purposes.
@@ -253,7 +265,12 @@ def process_page_lines(
     payload = {
         "submission_id": submission_id,
         "image_filename": image_filename,
-        **result,
+        "image_width": result["image_width"],
+        "image_height": result["image_height"],
+        "raw_image_filename": page_record.raw_image_filename,
+        "raw_image_width": page_record.raw_image_width,
+        "raw_image_height": page_record.raw_image_height,
+        "lines": result["lines"],
     }
     json_bytes = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
@@ -271,6 +288,9 @@ def process_page_lines(
             error=f"Failed to write lines JSON: {exc}",
             image_filename=image_filename,
             lines_filename="",
+            raw_image_filename=page_record.raw_image_filename,
+            raw_image_width=page_record.raw_image_width,
+            raw_image_height=page_record.raw_image_height,
         )
 
     logger.info(
@@ -289,4 +309,7 @@ def process_page_lines(
         error="",
         image_filename=image_filename,
         lines_filename=lines_filename,
+        raw_image_filename=page_record.raw_image_filename,
+        raw_image_width=page_record.raw_image_width,
+        raw_image_height=page_record.raw_image_height,
     )

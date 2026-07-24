@@ -41,6 +41,7 @@ def _make_config(max_submissions: int | None = None) -> MagicMock:
     cfg.submitter_fingerprint_salt = ""
     cfg.force_reprocess = False
     cfg.force_reprocess_metadata = False
+    cfg.backfill_raw_images = False
     return cfg
 
 
@@ -97,6 +98,24 @@ def _run_with_queue(queue: list[Submission], max_submissions: int | None) -> lis
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+class TestBackfillDispatch:
+    def test_backfill_flag_short_circuits_normal_pipeline(self):
+        """When BACKFILL_RAW_IMAGES is set, run() must delegate to
+        run_backfill() and must not touch the normal work-queue pipeline."""
+        config = _make_config()
+        config.backfill_raw_images = True
+
+        with (
+            patch(f"{_COORDINATOR}.Config.from_env", return_value=config),
+            patch(f"{_COORDINATOR}.build_work_queue") as mock_build_work_queue,
+            patch("transcriptor_worker.backfill.run_backfill") as mock_run_backfill,
+        ):
+            run()
+
+        mock_run_backfill.assert_called_once_with(config)
+        mock_build_work_queue.assert_not_called()
 
 
 class TestMaxSubmissionsSlicing:

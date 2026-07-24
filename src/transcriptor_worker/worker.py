@@ -259,6 +259,9 @@ def process_submission(
                     error=f"Line extraction error: {exc}",
                     image_filename=pr.image_filename,
                     lines_filename="",
+                    raw_image_filename=pr.raw_image_filename,
+                    raw_image_width=pr.raw_image_width,
+                    raw_image_height=pr.raw_image_height,
                 )
             updated_records.append(updated)
 

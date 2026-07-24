@@ -111,6 +111,9 @@ class PageRecord:
     error: str = ""
     image_filename: str = ""
     lines_filename: str = ""
+    raw_image_filename: str = ""
+    raw_image_width: int = 0
+    raw_image_height: int = 0
 
     # CSV column order
     CSV_FIELDS: list[str] = field(
@@ -122,6 +125,9 @@ class PageRecord:
             "error",
             "image_filename",
             "lines_filename",
+            "raw_image_filename",
+            "raw_image_width",
+            "raw_image_height",
         ],
         init=False,
         repr=False,
@@ -136,6 +142,9 @@ class PageRecord:
             "error": self.error,
             "image_filename": self.image_filename,
             "lines_filename": self.lines_filename,
+            "raw_image_filename": self.raw_image_filename,
+            "raw_image_width": str(self.raw_image_width),
+            "raw_image_height": str(self.raw_image_height),
         }
 
     @classmethod
@@ -148,6 +157,9 @@ class PageRecord:
             error=d.get("error", ""),
             image_filename=d.get("image_filename", ""),
             lines_filename=d.get("lines_filename", ""),
+            raw_image_filename=d.get("raw_image_filename", ""),
+            raw_image_width=int(d.get("raw_image_width") or 0),
+            raw_image_height=int(d.get("raw_image_height") or 0),
         )
 
 
@@ -159,6 +171,9 @@ PageRecord.CSV_FIELDS = [  # type: ignore[assignment]
     "error",
     "image_filename",
     "lines_filename",
+    "raw_image_filename",
+    "raw_image_width",
+    "raw_image_height",
 ]
 
 

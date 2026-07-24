@@ -6,9 +6,13 @@ For each submission:
   and re-encoded to JPEG for a uniform output format.
 - Every extracted page image passes through :func:`transform_image` before
   being written to target storage and the local temp directory.
+- The full, pre-resize resolution image (rotated to match the derived
+  image's orientation) is additionally uploaded to target storage as AVIF
+  so the original image quality/size is not lost.
 
 Naming convention:
-    ``{doc_basename}_p{N}.jpg``   (N is 1-based page number)
+    ``{doc_basename}_p{N}.jpg``    (derived/resized image; N is 1-based)
+    ``{doc_basename}_p{N}.avif``  (raw, full-resolution image)
 
 For image files *doc_basename* is the stored filename stem and N is always 1.
 For PDF files *doc_basename* is the PDF stem and N ranges over all pages.
@@ -39,6 +43,9 @@ PDF_RENDER_DPI = 300
 _OUTPUT_FORMAT = "jpeg"
 _OUTPUT_EXT = ".jpg"
 
+# Output format/extension for the full-resolution raw image upload.
+_RAW_OUTPUT_EXT = ".avif"
+
 
 @dataclass
 class ExtractPagesResult:
@@ -63,21 +70,34 @@ def _page_filename(doc_basename: str, page_number: int) -> str:
     return f"{doc_basename}_p{page_number}{_OUTPUT_EXT}"
 
 
+def _raw_page_filename(doc_basename: str, page_number: int) -> str:
+    """Derive the output filename for a raw (full-resolution) page image."""
+    return f"{doc_basename}_p{page_number}{_RAW_OUTPUT_EXT}"
+
+
 def _write_page(
     image_bytes: bytes,
     image_format: str,
     submission_id: str,
     filename: str,
+    raw_filename: str,
     target_storage: StorageBackend,
     temp_dir: str,
     transforms: list[dict[str, Any]] | None = None,
-) -> tuple[str, dict[str, Any]]:
-    """Transform, then write page image to both target storage and temp dir.
+) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
+    """Transform, then write page image (and raw original) to storage.
+
+    The derived (resized/rotated) image is written to both target storage
+    and the local temp dir (needed by downstream line detection).  The raw,
+    full-resolution image is written only to target storage as AVIF.
 
     Returns:
-        Tuple of (filename, applied_transforms dict).
+        Tuple of (filename, raw_info dict or None, applied_transforms dict).
+        ``raw_info`` has the form
+        ``{"filename": str, "width": int, "height": int}`` and is ``None``
+        if the raw image could not be built.
     """
-    data, applied = transform_image(image_bytes, image_format, transforms=transforms)
+    data, raw_image, applied = transform_image(image_bytes, image_format, transforms=transforms)
 
     target_path = f"{submission_id}/{filename}"
     target_storage.write_bytes(target_path, data)
@@ -89,7 +109,18 @@ def _write_page(
     local_path.write_bytes(data)
     logger.debug("Wrote page to temp: %s", local_path)
 
-    return filename, applied
+    raw_info: dict[str, Any] | None = None
+    if raw_image is not None:
+        raw_target_path = f"{submission_id}/{raw_filename}"
+        target_storage.write_bytes(raw_target_path, raw_image["bytes"])
+        logger.debug("Wrote raw page to target: %s", raw_target_path)
+        raw_info = {
+            "filename": raw_filename,
+            "width": raw_image["width"],
+            "height": raw_image["height"],
+        }
+
+    return filename, raw_info, applied
 
 
 def _extract_pdf_pages(
@@ -134,6 +165,7 @@ def _extract_pdf_pages(
     for page_idx in range(pdf.page_count):
         page_number = page_idx + 1
         filename = _page_filename(doc_basename, page_number)
+        raw_filename = _raw_page_filename(doc_basename, page_number)
         try:
             page = pdf[page_idx]
             pixmap = page.get_pixmap(dpi=PDF_RENDER_DPI)
@@ -145,11 +177,12 @@ def _extract_pdf_pages(
                 doc_entry = transforms_cache.get(doc_file.stored_filename, {})
                 page_transforms = doc_entry.get(str(page_number))
 
-            _, applied = _write_page(
+            _, raw_info, applied = _write_page(
                 image_bytes,
                 _OUTPUT_FORMAT,
                 submission_id,
                 filename,
+                raw_filename,
                 target_storage,
                 temp_dir,
                 transforms=page_transforms,
@@ -166,6 +199,9 @@ def _extract_pdf_pages(
                     page_number=page_number,
                     status="pending",
                     image_filename=filename,
+                    raw_image_filename=raw_info["filename"] if raw_info else "",
+                    raw_image_width=raw_info["width"] if raw_info else 0,
+                    raw_image_height=raw_info["height"] if raw_info else 0,
                 )
             )
             logger.debug(
@@ -212,6 +248,7 @@ def _extract_image_page(
     """
     doc_basename = Path(doc_file.stored_filename).stem
     filename = _page_filename(doc_basename, 1)
+    raw_filename = _raw_page_filename(doc_basename, 1)
 
     try:
         image = PILImage.open(io.BytesIO(raw_bytes))
@@ -230,11 +267,12 @@ def _extract_image_page(
             doc_entry = transforms_cache.get(doc_file.stored_filename, {})
             page_transforms = doc_entry.get("1")
 
-        _, applied = _write_page(
+        _, raw_info, applied = _write_page(
             image_bytes,
             _OUTPUT_FORMAT,
             submission_id,
             filename,
+            raw_filename,
             target_storage,
             temp_dir,
             transforms=page_transforms,
@@ -248,6 +286,9 @@ def _extract_image_page(
                 page_number=1,
                 status="pending",
                 image_filename=filename,
+                raw_image_filename=raw_info["filename"] if raw_info else "",
+                raw_image_width=raw_info["width"] if raw_info else 0,
+                raw_image_height=raw_info["height"] if raw_info else 0,
             ),
             {"1": [applied]},
         )
