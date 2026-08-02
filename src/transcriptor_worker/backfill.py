@@ -92,7 +92,9 @@ def _cached_rotation(
 def _rasterize_pdf_page(pdf: Any, page_idx: int) -> bytes:
     page = pdf[page_idx]
     pixmap = page.get_pixmap(dpi=PDF_RENDER_DPI)
-    return pixmap.tobytes(_OUTPUT_FORMAT)
+    image_bytes = pixmap.tobytes(_OUTPUT_FORMAT)
+    del pixmap
+    return image_bytes
 
 
 def _convert_image_doc(raw_bytes: bytes) -> bytes:

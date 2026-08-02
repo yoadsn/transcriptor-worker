@@ -36,8 +36,9 @@ from transcriptor_worker.storage.base import StorageBackend
 
 logger = logging.getLogger(__name__)
 
-# DPI used when rasterising PDF pages.
-PDF_RENDER_DPI = 300
+# DPI used when rasterising PDF pages. 200 DPI preserves a high-quality raw
+# AVIF while substantially reducing the transient rasterization memory peak.
+PDF_RENDER_DPI = 200
 
 # Output format for all page images written to storage.
 _OUTPUT_FORMAT = "jpeg"
@@ -167,9 +168,31 @@ def _extract_pdf_pages(
         filename = _page_filename(doc_basename, page_number)
         raw_filename = _raw_page_filename(doc_basename, page_number)
         try:
+            # Log before AND after the (pure-CPU) rasterization so the logs
+            # unambiguously show whether a hang is at PDF rendering (`page.get_pixmap`)
+            # or further on (transform / S3 write).
+            logger.info(
+                "Rendering page %d/%d of %s…",
+                page_number,
+                pdf.page_count,
+                doc_file.stored_filename,
+            )
             page = pdf[page_idx]
             pixmap = page.get_pixmap(dpi=PDF_RENDER_DPI)
             image_bytes = pixmap.tobytes(_OUTPUT_FORMAT)
+            width, height = pixmap.width, pixmap.height
+            # The JPEG bytes are independent of the pixmap; release the large
+            # uncompressed buffer before Pillow performs further processing.
+            del pixmap
+            logger.info(
+                "Rendered page %d/%d of %s: %dx%d => %d bytes",
+                page_number,
+                pdf.page_count,
+                doc_file.stored_filename,
+                width,
+                height,
+                len(image_bytes),
+            )
 
             # Push down only the relevant transforms for this page
             page_transforms: list[dict[str, Any]] | None = None

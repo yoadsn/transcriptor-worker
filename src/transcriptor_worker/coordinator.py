@@ -7,8 +7,10 @@ import logging
 import multiprocessing
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from transcriptor_worker.config import Config
 from transcriptor_worker.discovery import discover_submissions
@@ -25,6 +27,38 @@ from transcriptor_worker.storage.s3 import S3StorageBackend
 from transcriptor_worker.worker import StorageConfig, init_worker, process_submission
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_opt_int(value: object, default: int) -> int | None:
+    """Return *value* if it is a usable int, *default* if it is a mock/other,
+    or ``None`` if *value* is explicitly ``None`` (feature disabled)."""
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    return default
+
+
+def _in_flight_ids(
+    work_queue: list[Submission], collected_ids: set[str]
+) -> list[str]:
+    """Return submission ids that were dispatched but never returned.
+
+    These are the candidate tasks a stuck worker might be chewing on.
+    """
+    return [s.id for s in work_queue if s.id not in collected_ids]
+
+
+def _next_result(result_iter: Any, timeout: float) -> tuple[SubmissionRecord, list[PageRecord]]:
+    """Fetch the next result, honouring *timeout*.
+
+    ``multiprocessing.pool`` result iterators expose a ``.next(timeout)``
+    method.  Fall back to a plain ``next(...)`` for mocks/fakes in tests.
+    """
+    nxt = getattr(result_iter, "next", None)
+    if callable(nxt):
+        return nxt(timeout)
+    return next(result_iter)
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +390,64 @@ def run() -> None:
             config.force_reprocess_metadata,
         ),
     ) as pool:
-        for sub_record, page_records in pool.imap_unordered(worker_fn, work_queue):
+        result_iter = pool.imap_unordered(worker_fn, work_queue)
+        collected_ids: set[str] = set()
+        pending = len(work_queue)
+
+        # Worker-result watchdog.  A hung worker (e.g. a pathological PDF that
+        # never returns) would otherwise make `imap_unordered` block forever,
+        # silently stalling the whole run.  Instead we bound the wait: log the
+        # in-flight submissions after a stall, and abort after a hard timeout.
+        stall_log_s = _coerce_opt_int(config.worker_result_stall_log, 90)
+        hard_timeout_s = _coerce_opt_int(config.worker_result_timeout, 900)
+        poll_s = 10
+        logger.info(
+            "Worker-result watchdog: WARN if no result for %ss, ABORT after %ss",
+            stall_log_s if stall_log_s is not None else "off",
+            hard_timeout_s if hard_timeout_s is not None else "off",
+        )
+
+        last_result = time.monotonic()
+        stall_warned = False
+        while pending > 0:
+            try:
+                sub_record, page_records = _next_result(result_iter, poll_s)
+            except StopIteration:
+                logger.warning(
+                    "Pool produced fewer results than expected (%d/%d collected) — "
+                    "aborting collection.",
+                    len(new_sub_records),
+                    len(work_queue),
+                )
+                break
+            except multiprocessing.TimeoutError:
+                elapsed = time.monotonic() - last_result
+                if (
+                    stall_log_s is not None
+                    and elapsed >= stall_log_s
+                    and not stall_warned
+                ):
+                    in_flight = _in_flight_ids(work_queue, collected_ids)
+                    logger.warning(
+                        "No worker result for %.0fs — worker(s) appear stuck. "
+                        "In-flight (dispatched, not yet collected) submission(s): %s",
+                        elapsed,
+                        in_flight,
+                    )
+                    stall_warned = True
+                if hard_timeout_s is not None and elapsed >= hard_timeout_s:
+                    in_flight = _in_flight_ids(work_queue, collected_ids)
+                    raise RuntimeError(
+                        "Coordinator watchdog: no worker result for "
+                        f"{elapsed:.0f}s (limit {hard_timeout_s}s). "
+                        f"In-flight submission(s): {in_flight}"
+                    )
+                continue
+
+            last_result = time.monotonic()
+            stall_warned = False
+            pending -= 1
+            collected_ids.add(sub_record.submission_id)
             new_sub_records.append(sub_record)
             new_page_records.extend(page_records)
             logger.info(

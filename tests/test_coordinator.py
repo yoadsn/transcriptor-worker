@@ -5,6 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import multiprocessing
+
 import pytest
 
 from transcriptor_worker.coordinator import run
@@ -139,3 +141,42 @@ class TestMaxSubmissionsSlicing:
         dispatched = _run_with_queue(queue, max_submissions=10)
         assert len(dispatched) == 3
         assert dispatched == queue
+
+
+class TestWorkerWatchdog:
+    def test_hung_worker_aborts_run_with_inflight_log_message(self):
+        """A result that never arrives must abort the run (RuntimeError) and name
+        the in-flight submissions — instead of hanging forever."""
+        queue = [_make_submission(i) for i in range(3)]
+        config = _make_config()
+
+        # Simulate a worker that hangs: the pool result iterator times out forever.
+        class HungResultIterator:
+            def next(self, timeout=None):  # noqa: ANN001
+                raise multiprocessing.TimeoutError("timeout")
+
+        fake_pool = MagicMock()
+        fake_pool.__enter__ = lambda s: fake_pool
+        fake_pool.__exit__ = MagicMock(return_value=False)
+        fake_pool.imap_unordered = MagicMock(return_value=HungResultIterator())
+
+        fake_ctx = MagicMock()
+        fake_ctx.Pool.return_value = fake_pool
+
+        # Force the watchdog to trip almost immediately.
+        config.worker_result_stall_log = 1
+        config.worker_result_timeout = 1
+
+        with (
+            patch(f"{_COORDINATOR}.Config.from_env", return_value=config),
+            patch(f"{_COORDINATOR}._build_storage") as mock_build_storage,
+            patch(f"{_COORDINATOR}._check_source_readable"),
+            patch(f"{_COORDINATOR}._check_target_writable"),
+            patch(f"{_COORDINATOR}.build_work_queue", return_value=queue),
+            patch(f"{_COORDINATOR}.load_pages_csv", return_value=[]),
+            patch(f"{_COORDINATOR}.load_submissions_csv", return_value={}),
+            patch(f"{_COORDINATOR}.multiprocessing.get_context", return_value=fake_ctx),
+        ):
+            mock_build_storage.return_value = (MagicMock(), "")
+            with pytest.raises(RuntimeError, match="no worker result"):
+                run()

@@ -96,6 +96,21 @@ class TestConfigHappyPath:
         cfg = Config.from_env(_env(TEMP_DIR="/custom/tmp"))
         assert cfg.temp_dir == "/custom/tmp"
 
+    def test_worker_result_watchdog_defaults(self):
+        cfg = Config.from_env(_env())
+        assert cfg.worker_result_stall_log == 90
+        assert cfg.worker_result_timeout == 900
+
+    def test_worker_result_watchdog_parsed(self):
+        cfg = Config.from_env(_env(WORKER_RESULT_STALL_LOG="30", WORKER_RESULT_TIMEOUT="120"))
+        assert cfg.worker_result_stall_log == 30
+        assert cfg.worker_result_timeout == 120
+
+    def test_worker_result_watchdog_disabled_by_zero(self):
+        cfg = Config.from_env(_env(WORKER_RESULT_STALL_LOG="0", WORKER_RESULT_TIMEOUT="0"))
+        assert cfg.worker_result_stall_log is None
+        assert cfg.worker_result_timeout is None
+
     def test_config_is_frozen(self):
         cfg = Config.from_env(_env())
         with pytest.raises((AttributeError, TypeError)):

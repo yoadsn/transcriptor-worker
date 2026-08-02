@@ -51,6 +51,15 @@ class Config:
     # Local temp directory for page images during a run
     temp_dir: str
 
+    # Worker-result watchdog: bound how long the coordinator waits for a
+    # result before declaring worker(s) stuck. ``None`` disables the feature.
+    # ``worker_result_stall_log`` = log a WARNING with the in-flight
+    # submissions after this many seconds of receiving no result.
+    # ``worker_result_timeout`` = abort the run (fail fast) after this many
+    # seconds of receiving no result, instead of hanging forever.
+    worker_result_stall_log: int | None = 90
+    worker_result_timeout: int | None = 900
+
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Config":
         """Construct a :class:`Config` from environment variables.
@@ -96,18 +105,32 @@ class Config:
             )
 
         def optional_int(name: str) -> int | None:
-            val = e.get(name, "").strip()
-            if not val:
+            raw_val = e.get(name, "").strip()
+            if not raw_val:
                 return None
             try:
-                result = int(val)
+                result = int(raw_val)
                 if result < 1:
                     raise ValueError
             except ValueError:
                 raise ConfigError(
-                    f"{name} must be a positive integer, got {val!r}."
+                    f"{name} must be a positive integer, got {raw_val!r}."
                 )
             return result
+
+        def optional_int_default(name: str, default: int) -> int | None:
+            """Return *default* when *name* is unset; ``None`` when explicitly
+            set to ``0`` (used to disable the worker watchdog)."""
+            raw = e.get(name, "").strip()
+            if not raw:
+                return default
+            try:
+                result = int(raw)
+            except ValueError:
+                raise ConfigError(
+                    f"{name} must be an integer, got {raw!r}."
+                )
+            return result if result >= 1 else None
 
         def optional_bool(name: str) -> bool:
             val = e.get(name, "").strip().lower()
@@ -144,4 +167,6 @@ class Config:
             detector_blank_threshold=optional_float("DETECTOR_BLANK_THRESHOLD"),
             submitter_fingerprint_salt=e.get("SUBMITTER_FINGERPRINT_SALT", ""),
             temp_dir=e.get("TEMP_DIR", "").strip() or tempfile.gettempdir(),
+            worker_result_stall_log=optional_int_default("WORKER_RESULT_STALL_LOG", 90),
+            worker_result_timeout=optional_int_default("WORKER_RESULT_TIMEOUT", 900),
         )

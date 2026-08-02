@@ -100,14 +100,14 @@ class TestResizeTransform:
         assert applied["original_size"] == (4000, 2000)
         result_img = Image.open(io.BytesIO(result))
         assert result_img.width == MAX_DIMENSION
-        assert result_img.height == 1500
+        assert result_img.height == round(2000 * MAX_DIMENSION / 4000)
 
     def test_tall_image_is_resized(self):
         data = _create_jpeg_bytes(2000, 5000)
         result, raw_image, applied = transform_image(data, "jpeg")
         assert applied["original_size"] == (2000, 5000)
         result_img = Image.open(io.BytesIO(result))
-        assert result_img.width == 1200
+        assert result_img.width == round(2000 * MAX_DIMENSION / 5000)
         assert result_img.height == MAX_DIMENSION
 
     def test_square_image_over_limit_is_resized(self):
